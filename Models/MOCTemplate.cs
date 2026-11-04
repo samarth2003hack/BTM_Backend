@@ -2,6 +2,9 @@ using System.ComponentModel.DataAnnotations;
 
 namespace EMSAPI.Models
 {
+    // The table (and SP_MOCTemplate) is dbo.MOCTemplate. Without this the DbSet
+    // name makes EF query "MOCTemplates", which does not exist.
+    [System.ComponentModel.DataAnnotations.Schema.Table("MOCTemplate")]
     public class MOCTemplate
     {
         [Key]
