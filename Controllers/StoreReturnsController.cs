@@ -118,6 +118,7 @@ namespace EMSAPI.Controllers
                         l.LinkNo, l.PartNo, l.PartCode, l.PartName, l.GradeNo, l.Grade,
                         l.OAYear, l.OANo, OaID = l.OAID,
                         IssueQty = l.Qty, BalQty = bal, RtnQty = ownQty,
+                        ReturnType = o?.ReturnType ?? "Unused",
                         l.Unit, ItemRemarks = o?.ItemRemarks ?? ""
                     });
                 }
@@ -128,6 +129,7 @@ namespace EMSAPI.Controllers
                         o.TransSlNo, LinkNo = o.LinkNo ?? 0, o.PartNo, o.PartCode, PartName = o.PartDescription,
                         o.GradeNo, Grade = o.Grade ?? "", o.OAYear, o.OANo, OaID = o.OAID,
                         IssueQty = o.IssueQty, BalQty = o.RTNQty, RtnQty = o.RTNQty,
+                        ReturnType = o.ReturnType ?? "Unused",
                         o.Unit, ItemRemarks = o.ItemRemarks ?? ""
                     });
                 }
@@ -388,6 +390,12 @@ namespace EMSAPI.Controllers
                 };
                 var id = await db.CallStoreReturnsDtlSP(line);
                 if (id <= 0) return ConflictResult(label + " could not be saved.");
+
+                // Unused / End Piece / Scrap (SQL 58).
+                var plan = await db.CallStoreReturnsDtlPlanFieldsSP(id,
+                    string.IsNullOrWhiteSpace(dto.ReturnType) ? null : dto.ReturnType.Trim(), dto.UserNo, h.SubscID);
+                if (plan.ID == 0) return ConflictResult(label + ": " + plan.Message);
+
                 await tx.CommitAsync();
                 return OkResult(new { id, TransSlNo = id }, "Line saved.");
             }

@@ -18,6 +18,11 @@ namespace EMSAPI.Models
         public string? Operation { get; set; }       // legacy comma-separated form
         public DateTime? DateofInst { get; set; }
         public decimal? Capacity { get; set; }
+        public string? CapacityUnit { get; set; }    // planning fields (SQL 58); null = keep
+        public int? ShiftsPerDay { get; set; }
+        public decimal? EfficiencyPct { get; set; }
+        public decimal? MinPieceWt { get; set; }
+        public decimal? MaxPieceWt { get; set; }
         public string? Remarks { get; set; }
         public string? LockStatus { get; set; }
         public int CreatedBy { get; set; }
@@ -37,6 +42,7 @@ namespace EMSAPI.Models
         public string? DieType { get; set; }         // or the die type name
         public decimal MaxQty { get; set; }
         public decimal OpeningQty { get; set; }
+        public string? DieStatus { get; set; }       // Ready / In Repair / Scrapped (SQL 58); null = keep
         public string? Remarks { get; set; }
         public string? LockStatus { get; set; }
         public int CreatedBy { get; set; }
@@ -54,6 +60,7 @@ namespace EMSAPI.Models
         public int GradeNo { get; set; }
         public string? RouteName { get; set; }
         public int BatchQty { get; set; }
+        public int? PostForgeDays { get; set; }      // SQL 58; null = keep
         public string? LockStatus { get; set; }
         public int CreatedBy { get; set; }
         public int UserNo { get; set; }
@@ -100,7 +107,11 @@ namespace EMSAPI.Models
         public int FGradeNo { get; set; }
         public int PartNo { get; set; }
         public int GradeNo { get; set; }
-        public decimal Qty { get; set; }
+        public decimal Qty { get; set; }             // cut weight, kg per piece
+        // Bar details (SQL 58) — the page posts BarDia / CutLength / YieldPct; null = keep.
+        public decimal? BarDia { get; set; }
+        public decimal? CutLength { get; set; }
+        public decimal? YieldPct { get; set; }
         public string? Remarks { get; set; }
         public string? LockStatus { get; set; }
         public int UserNo { get; set; }

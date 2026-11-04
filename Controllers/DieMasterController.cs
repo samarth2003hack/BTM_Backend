@@ -27,8 +27,10 @@ namespace EMSAPI.Controllers
         // ============================================================
         // SAVE / UPDATE
         // Body: { mTransNo, partNo, grade (text) | gradeNo, dieTypeNo,
-        //         maxQty, openingQty, remarks, lockStatus, createdBy,
-        //         subscID, status }
+        //         maxQty, openingQty, dieStatus, remarks, lockStatus,
+        //         createdBy, subscID, status }
+        // dieStatus (SQL 58): Ready / In Repair / Scrapped; absent = keep
+        // (a new die is Ready).
         // ============================================================
 
         [HttpPost("SaveData")]
@@ -80,6 +82,7 @@ namespace EMSAPI.Controllers
                         return ConflictResult("The selected Die Type no longer exists.");
                 }
 
+                await using var tx = await db.Database.BeginTransactionAsync();
                 var now = DateTime.Now;
                 var result = await db.CallDieMstSP(new SP_DieMst
                 {
@@ -100,6 +103,12 @@ namespace EMSAPI.Controllers
                 });
 
                 if (result.ID == 0) return ConflictResult(result.Message);
+
+                var plan = await db.CallDiePlanFieldsSP(result.ID,
+                    string.IsNullOrWhiteSpace(dto.DieStatus) ? null : dto.DieStatus.Trim(), userNo, dto.SubscID);
+                if (plan.ID == 0) return ConflictResult(plan.Message);
+
+                await tx.CommitAsync();
                 return OkResult($"OK^{result.ID}", result.Message);
             }
             catch (Exception ex) { return ErrorResult(ex); }
@@ -141,7 +150,7 @@ namespace EMSAPI.Controllers
         // GET LIST
         // Row: { mTransNo, id, partNo, partCode, partName, dieCode, dieName,
         //        grade, gradeNo, dieTypeNo, dieTypeName, dieType, maxQty,
-        //        openingQty, usedQty, processedQty, remainingQty,
+        //        openingQty, usedQty, processedQty, remainingQty, dieStatus,
         //        entryUseCount, lockStatus, remarks, createdOn }
         // ============================================================
 
@@ -214,6 +223,7 @@ namespace EMSAPI.Controllers
                        CONVERT(numeric(12,2), d.OpeningQty + u.q) AS processedQty,
                        CONVERT(numeric(12,2), CASE WHEN d.MaxQty - (d.OpeningQty + u.q) > 0
                                                    THEN d.MaxQty - (d.OpeningQty + u.q) ELSE 0 END) AS remainingQty,
+                       ISNULL(d.DieStatus, 'Ready')        AS dieStatus,
                        u.n                                 AS entryUseCount,
                        d.LockStatus                        AS lockStatus,
                        ISNULL(d.Remarks, '')               AS remarks,

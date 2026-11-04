@@ -26,7 +26,10 @@ namespace EMSAPI.Controllers
     ///     (step 1 is capped by the job card qty);
     ///   - pieces already inspected must stay covered at the inspection step;
     ///   - recording the first entry of a job card is refused while another job
-    ///     card of the same product is In Progress.
+    ///     card of the same product is In Progress on the same die (SQL 58: a
+    ///     second die of the product, e.g. on another hammer, may run in
+    ///     parallel; when either job card has no die the same-product rule holds);
+    ///   - an entry's rejected qty is between 0 and its processed qty.
     /// Validation and write run in one transaction with the job card row locked.
     /// </summary>
     [Route("api/[controller]")]
@@ -54,7 +57,11 @@ namespace EMSAPI.Controllers
                         e.SettingMin                        AS settingMin,
                         e.IdleMin                           AS idleMin,
                         e.Qty                               AS qty,
-                        e.Remarks                           AS remarks
+                        e.Remarks                           AS remarks,
+                        ISNULL(e.Operator, '')              AS operator,
+                        ISNULL(e.Shift, '')                 AS shift,
+                        ISNULL(e.IdleReason, '')            AS idleReason,
+                        ISNULL(e.RejectedQty, 0)            AS rejectedQty
                   FROM  dbo.JobCardEntry e
                   LEFT JOIN dbo.OtherMaster op ON op.MTransNo = e.OperationNo
                   LEFT JOIN dbo.MachineMst  m  ON m.MTransNo  = e.MachineNo
@@ -79,6 +86,7 @@ namespace EMSAPI.Controllers
                 // Lock the job card for the whole validate-and-write.
                 var jc = await QueryOne(@"
                     SELECT j.MTransNo, j.JobCardNo, j.PartNo, j.GradeNo, j.Grade, j.Qty, j.SubscID,
+                           ISNULL(j.DieNo, 0) AS DieNo,
                            p.PartCode, LTRIM(RTRIM(ISNULL(r.DieType, ''))) AS DieType,
                            (SELECT COUNT(*) FROM dbo.JobCardEntry e
                              WHERE e.MTransNo = j.MTransNo AND e.DeleteStatus = 'N') AS EntryCount
@@ -94,19 +102,23 @@ namespace EMSAPI.Controllers
                 var jobNo = S(jc, "JobCardNo");
                 var jobQty = D(jc, "Qty");
 
-                // ── One product in progress at a time ─────────────────────
+                // ── One job card per die in progress at a time ────────────
+                // Same product AND (either card has no die OR the same die).
                 if (I(jc, "EntryCount") == 0 && entries.Count > 0)
                 {
                     var blocker = await QueryOne(@"
-                        SELECT TOP (1) j.JobCardNo FROM dbo.JobCardMst j
+                        SELECT TOP (1) j.JobCardNo, ISNULL(j.DieNo, 0) AS DieNo FROM dbo.JobCardMst j
                           JOIN dbo.VW_JobCardSummary s ON s.JobCardTransNo = j.MTransNo
                          WHERE j.SubscID = @S AND j.PartNo = @P AND j.MTransNo <> @M
                            AND j.DeleteStatus = 'N' AND s.JobStatus = 'In Progress'
+                           AND (@D = 0 OR j.DieNo IS NULL OR j.DieNo = @D)
                          ORDER BY j.MTransNo",
-                        Int("@S", subscID), Int("@P", I(jc, "PartNo")), Int("@M", r.MTransNo));
+                        Int("@S", subscID), Int("@P", I(jc, "PartNo")), Int("@M", r.MTransNo), Int("@D", I(jc, "DieNo")));
                     if (blocker != null)
                         return ConflictResult(
-                            $"{S(blocker, "JobCardNo")} for {S(jc, "PartCode")} is still In Progress. Complete it before starting {jobNo}.");
+                            $"{S(blocker, "JobCardNo")} for {S(jc, "PartCode")} is still In Progress" +
+                            (I(jc, "DieNo") > 0 && I(blocker, "DieNo") > 0 ? " on the same die" : "") +
+                            $". Complete it before starting {jobNo}.");
                 }
 
                 // ── Reference data ────────────────────────────────────────
@@ -166,6 +178,8 @@ namespace EMSAPI.Controllers
                     if (b <= a) return ConflictResult($"{label}: End Time must be after Start Time.");
                     if (e.SettingMin < 0 || e.IdleMin < 0) return ConflictResult($"{label}: setting and idle time cannot be negative.");
                     if (e.Qty <= 0) return ConflictResult($"{label}: Process Quantity must be greater than zero.");
+                    if (e.RejectedQty < 0 || e.RejectedQty > e.Qty)
+                        return ConflictResult($"{label}: Rejected Qty must be between 0 and the Process Quantity ({Q(e.Qty)}).");
 
                     rows.Add(new
                     {
@@ -180,6 +194,11 @@ namespace EMSAPI.Controllers
                         idleMin = e.IdleMin,
                         qty = e.Qty,
                         remarks = string.IsNullOrWhiteSpace(e.Remarks) ? null : Trunc(e.Remarks, 250),
+                        // SQL 58 — written by SP_JobCardEntryPlanFields from this same JSON.
+                        @operator = Trunc(e.Operator, 50),
+                        shift = Trunc(e.Shift, 50),
+                        idleReason = Trunc(e.IdleReason, 100),
+                        rejectedQty = e.RejectedQty,
                     });
                 }
 
@@ -218,9 +237,13 @@ namespace EMSAPI.Controllers
                         $"{Q(inspected)} pieces are already inspected, but only {Q(eligible)} would have reached step " +
                         $"{(insp == null ? "" : I(insp, "SlNo").ToString())}. Correct the inspection first.");
 
-                var result = await db.CallJobCardEntrySaveSP(
-                    r.MTransNo, false, JsonSerializer.Serialize(rows), null, userNo, subscID);
+                var json = JsonSerializer.Serialize(rows);
+                var result = await db.CallJobCardEntrySaveSP(r.MTransNo, false, json, null, userNo, subscID);
                 if (result.ID == 0) return ConflictResult(result.Message);
+
+                // Operator / shift / idle reason / rejected qty per entry (SQL 58).
+                var plan = await db.CallJobCardEntryPlanFieldsSP(r.MTransNo, json, userNo, subscID);
+                if (plan.ID == 0) return ConflictResult(plan.Message);
 
                 await tx.CommitAsync();
                 return OkResult($"OK^{r.MTransNo}", "Record Saved Successfully");

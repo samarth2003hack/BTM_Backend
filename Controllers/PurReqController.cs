@@ -310,8 +310,16 @@ namespace EMSAPI.Controllers
             try
             {
                 dto.SystemIP = ClientIp;
+                await using var tx = await db.Database.BeginTransactionAsync();
                 var result = await db.CallPurReqDtlSP(dto);
                 if (result.ID == 0) return ConflictResult(result.Message);
+
+                // Line required-by date (SQL 58); null = the header due date.
+                var plan = await db.CallPurReqDtlPlanFieldsSP(result.ID, dto.RequiredBy,
+                    dto.ModifiedBy ?? dto.CreatedBy ?? 0, dto.SubscID ?? 0);
+                if (plan.ID == 0) return ConflictResult(plan.Message);
+
+                await tx.CommitAsync();
                 return OkResult(new { ID = result.ID }, result.Message);
             }
             catch (Exception ex) { return ErrorResult(ex); }
@@ -390,7 +398,7 @@ namespace EMSAPI.Controllers
                         x.TransSlNo, x.SlNo, x.MTransNo, x.PartNo,
                         x.ItemRemarks, x.Qty, x.Unit,
                         x.OAYear, x.OANo, x.OAID,
-                        x.GradeNo, x.Grade,
+                        x.GradeNo, x.Grade, x.RequiredBy,
                         x.CreatedBy, x.CreatedOn, x.ModifiedBy, x.ModifiedOn
                     })
                     .ToListAsync();

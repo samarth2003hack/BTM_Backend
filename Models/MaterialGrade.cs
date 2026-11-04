@@ -18,6 +18,8 @@ namespace EMSAPI.Models
         public decimal? MinStock { get; set; }
         public decimal? MaxStock { get; set; }
         public decimal? MOQ { get; set; }
+        public decimal? SafetyStock { get; set; }     // SQL 58
+        public int? LeadTimeDays { get; set; }        // SQL 58
 
         public string? SystemIP { get; set; }
         public int? CreatedBy { get; set; }
@@ -45,6 +47,9 @@ namespace EMSAPI.Models
         public decimal? MinStock { get; set; }
         public decimal? MaxStock { get; set; }
         public decimal? MOQ { get; set; }
+        // Planning (SQL 58) — saved by SP_MaterialGradePlanFields; null = keep.
+        public decimal? SafetyStock { get; set; }
+        public int? LeadTimeDays { get; set; }
 
         public string? SystemIP { get; set; }
         public string LockStatus { get; set; } = "N";

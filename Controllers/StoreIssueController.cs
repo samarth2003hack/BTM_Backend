@@ -214,6 +214,7 @@ namespace EMSAPI.Controllers
                         DcOperation = o?.DCOpration ?? "",
                         MrnQty = l.Qty, BalQty = bal, IssueQty = ownQty,
                         ReturnedQty = o == null ? 0 : returned.FirstOrDefault(r => r.LinkNo == o.TransSlNo)?.ReturnedQty ?? 0,
+                        HeatNo = o?.HeatNo ?? "",
                         l.Unit,
                         ItemRemarks = o?.ItemRemarks ?? ""
                     });
@@ -229,6 +230,7 @@ namespace EMSAPI.Controllers
                         DcOperation = o.DCOpration ?? "",
                         MrnQty = o.MRNQty, BalQty = o.Qty, IssueQty = o.Qty,
                         ReturnedQty = returned.FirstOrDefault(r => r.LinkNo == o.TransSlNo)?.ReturnedQty ?? 0,
+                        HeatNo = o.HeatNo ?? "",
                         o.Unit, ItemRemarks = o.ItemRemarks ?? ""
                     });
                 }
@@ -533,6 +535,13 @@ namespace EMSAPI.Controllers
                 };
                 var id = await db.CallStoreIssueDtlSP(line);
                 if (id <= 0) return ConflictResult(label + " could not be saved.");
+
+                // Heat number off the bar tag (SQL 58): blank, or an approved
+                // heat of this part — see api/HeatNo/Dtl/GetByPart.
+                var plan = await db.CallStoreIssueDtlPlanFieldsSP(id,
+                    Trunc(dto.HeatNo, 50).ToUpperInvariant(), dto.UserNo, h.SubscID);
+                if (plan.ID == 0) return ConflictResult(label + ": " + plan.Message);
+
                 await tx.CommitAsync();
                 return OkResult(new { id, TransSlNo = id }, "Line saved.");
             }

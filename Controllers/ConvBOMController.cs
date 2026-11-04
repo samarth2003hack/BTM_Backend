@@ -32,6 +32,9 @@ namespace EMSAPI.Controllers
                    ISNULL(b.GradeNo, 0)                AS gradeNo,
                    ISNULL(b.Grade, '')                 AS grade,
                    b.Qty                               AS qty,
+                   ISNULL(b.BarDia, 0)                 AS barDia,
+                   ISNULL(b.CutLength, 0)              AS cutLength,
+                   ISNULL(b.YieldPct, 0)               AS yieldPct,
                    ISNULL(NULLIF(b.Unit, ''), ISNULL(rp.PrimaryUnit, '')) AS unit,
                    ISNULL(b.Remarks, '')               AS remarks,
                    b.LockStatus                        AS lockStatus,
@@ -129,7 +132,8 @@ namespace EMSAPI.Controllers
         // ============================================================
         // SAVE — insert when mTransNo is 0, else update
         // Body: { mTransNo, fPartNo, fGradeNo, partNo, gradeNo, qty,
-        //         remarks, lockStatus, userNo, subscID }
+        //         BarDia, CutLength, YieldPct, remarks, lockStatus, userNo, subscID }
+        // qty = cut weight (kg per piece). Bar details: SQL 58, absent = keep.
         // ============================================================
 
         [HttpPost("SaveData")]
@@ -144,8 +148,15 @@ namespace EMSAPI.Controllers
                 dto.Remarks = (dto.Remarks ?? "").Trim();
                 dto.LockStatus = dto.LockStatus is "Y" or "S" ? dto.LockStatus : "N";
 
+                await using var tx = await db.Database.BeginTransactionAsync();
                 var result = await db.CallConvBOMSP(dto, dto.MTransNo > 0 ? "Update" : "Insert", null, ClientIp);
                 if (result.ID == 0) return ConflictResult(result.Message);
+
+                var plan = await db.CallConvBOMPlanFieldsSP(result.ID, dto.BarDia, dto.CutLength, dto.YieldPct,
+                    dto.UserNo, dto.SubscID);
+                if (plan.ID == 0) return ConflictResult(plan.Message);
+
+                await tx.CommitAsync();
                 return OkResult($"OK^{result.ID}", result.Message);
             }
             catch (Exception ex) { return ErrorResult(ex); }
@@ -183,7 +194,7 @@ namespace EMSAPI.Controllers
         // GET RM LIST — raw materials of a finished part, for the Job Card
         // GetRMList?PartNo=&SubscID=[&FGradeNo=|&FGrade=]
         // Row: { partNo (RM), partCode, partName, unit, grade, gradeNo,
-        //        qtyPerPc, fgGrade, fgGradeNo, lockStatus }
+        //        qtyPerPc, barDia, cutLength, yieldPct, fgGrade, fgGradeNo, lockStatus }
         // A grade filter keeps the lines of that FG grade plus the lines
         // that apply to every grade (blank FG grade).
         // ============================================================
@@ -208,6 +219,9 @@ namespace EMSAPI.Controllers
                            ISNULL(b.Grade, '')                 AS grade,
                            ISNULL(b.GradeNo, 0)                AS gradeNo,
                            b.Qty                               AS qtyPerPc,
+                           ISNULL(b.BarDia, 0)                 AS barDia,
+                           ISNULL(b.CutLength, 0)              AS cutLength,
+                           ISNULL(b.YieldPct, 0)               AS yieldPct,
                            ISNULL(b.FGrade, '')                AS fgGrade,
                            ISNULL(b.FGradeNo, 0)               AS fgGradeNo,
                            b.LockStatus                        AS lockStatus

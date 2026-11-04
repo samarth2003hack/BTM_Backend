@@ -1,6 +1,8 @@
 using EMSAPI.Models;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using System.Data;
 
 namespace EMSAPI.Controllers
 {
@@ -19,6 +21,8 @@ namespace EMSAPI.Controllers
     ///     Mst/SaveData                  open the heat document
     ///     Dtl/SaveData                  one heat, with RefFrom/RefTo
     ///     Dtl/CheckHeatNo               is this heat already recorded?
+    ///     Dtl/GetByPart                 approved heats of a part, with balance
+    ///                                   (the Store Issue heat-no picker)
     ///     Dtl/UploadTC                  attach the test certificate
     ///     Mst/Approve                   submitted (S) → approved (Y)
     ///     Mst/LockUnlock                Lock = approve, Unlock = back to S
@@ -587,6 +591,62 @@ namespace EMSAPI.Controllers
                     existing == null
                         ? "Heat number is available."
                         : $"Heat number {trimmed} is already recorded for this part.");
+            }
+            catch (Exception ex) { return ErrorResult(ex); }
+        }
+
+        /// <summary>
+        /// Approved heat numbers of one part (and grade, when given) with what
+        /// is left of each — the Store Issue line's Heat No picker (SQL 58).
+        /// GetByPart?partNo=&amp;grade=&amp;subscID=
+        /// Row: { heatNo, tcNo, tcDate, grade, unit, qty, issuedQty, balanceQty,
+        ///        grnNo, grnTransNo, heatDocNo, transSlNo }
+        /// issuedQty = Σ live StoreIssueDtl.Qty of this part carrying the heat.
+        /// A heat without a grade of its own matches every grade.
+        /// </summary>
+        [HttpGet("Dtl/GetByPart")]
+        public async Task<IActionResult> DtlGetByPart(
+            [FromQuery] int partNo,
+            [FromQuery] int subscID,
+            [FromQuery] string? grade = null)
+        {
+            if (partNo <= 0) return BadRequestResult("Part No is required.");
+            if (subscID <= 0) return BadRequestResult("Invalid Subscription.");
+
+            try
+            {
+                var data = await db.PmQueryRowsAsync("""
+                    SELECT UPPER(LTRIM(RTRIM(d.HeatNo)))              AS heatNo,
+                           ISNULL(d.TCNo, '')                         AS tcNo,
+                           CONVERT(char(10), d.TCDate, 23)            AS tcDate,
+                           LTRIM(RTRIM(ISNULL(NULLIF(LTRIM(RTRIM(d.Grade)), ''), ISNULL(m.Grade, '')))) AS grade,
+                           ISNULL(NULLIF(d.Unit, ''), ISNULL(m.Unit, '')) AS unit,
+                           d.Qty                                      AS qty,
+                           ISNULL(iss.q, 0)                           AS issuedQty,
+                           d.Qty - ISNULL(iss.q, 0)                   AS balanceQty,
+                           CONCAT(m.TargetDocYear, '-', m.TargetDocNo) AS grnNo,
+                           m.TargetTransNo                            AS grnTransNo,
+                           CONCAT(m.DocYear, '-', m.DocNo)            AS heatDocNo,
+                           d.TransSlNo                                AS transSlNo
+                      FROM dbo.HeatNoDtl d
+                      JOIN dbo.HeatNoMst m ON m.MTransNo = d.MTransNo
+                                          AND m.DeleteStatus = 'N' AND m.LockStatus = 'Y'
+                     OUTER APPLY (SELECT SUM(i.Qty) AS q
+                                    FROM dbo.StoreIssueDtl i
+                                    JOIN dbo.StoreIssueMst im ON im.MTransNo = i.MTransNo AND im.DeleteStatus = 'N'
+                                   WHERE i.DeleteStatus = 'N' AND i.SubscID = d.SubscID AND i.PartNo = d.PartNo
+                                     AND UPPER(LTRIM(RTRIM(i.HeatNo))) = UPPER(LTRIM(RTRIM(d.HeatNo)))) iss
+                     WHERE d.SubscID = @SubscID AND d.DeleteStatus = 'N' AND d.PartNo = @PartNo
+                       AND LTRIM(RTRIM(ISNULL(d.HeatNo, ''))) <> ''
+                       AND (@Grade = ''
+                            OR LTRIM(RTRIM(ISNULL(NULLIF(LTRIM(RTRIM(d.Grade)), ''), ISNULL(m.Grade, '')))) IN ('', @Grade))
+                     ORDER BY m.DocDate, m.DocNo, d.SlNo
+                    """,
+                    new SqlParameter("@PartNo",  SqlDbType.Int) { Value = partNo },
+                    new SqlParameter("@SubscID", SqlDbType.Int) { Value = subscID },
+                    new SqlParameter("@Grade",   SqlDbType.VarChar, 50) { Value = (grade ?? "").Trim() });
+
+                return OkResult(data, data.Count > 0 ? "Data found." : "No approved heats for this part.");
             }
             catch (Exception ex) { return ErrorResult(ex); }
         }

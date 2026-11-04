@@ -656,8 +656,19 @@ namespace EMSAPI.Controllers
                     dto.ModifiedBy ??= dto.CreatedBy;
                     dto.ModifiedOn   = DateTime.Now;
                 }
+                await using var tx = await db.Database.BeginTransactionAsync();
                 var result = await db.CallOADtlSP(dto);
                 if (result.ID == 0) return ConflictResult(result.Message);
+
+                // Planning fields of the line (SQL 58): committed date
+                // (null = delivery date), priority, customer-supplied material.
+                var plan = await db.CallOADtlPlanFieldsSP(result.ID, dto.CommittedDate,
+                    string.IsNullOrWhiteSpace(dto.Priority) ? null : dto.Priority.Trim(),
+                    string.IsNullOrWhiteSpace(dto.CustomerMaterial) ? null : dto.CustomerMaterial.Trim().ToUpperInvariant(),
+                    dto.ModifiedBy ?? dto.CreatedBy ?? 0, dto.SubscID ?? 0);
+                if (plan.ID == 0) return ConflictResult(plan.Message);
+
+                await tx.CommitAsync();
                 return OkResult(new { ID = result.ID }, result.Message);
             }
             catch (Exception ex) { return ErrorResult(ex); }
@@ -789,6 +800,9 @@ namespace EMSAPI.Controllers
                         x.POID,
                         x.AmdNo,
                         x.AmdMode,
+                        x.CommittedDate,
+                        Priority = x.Priority ?? "Normal",
+                        CustomerMaterial = x.CustomerMaterial ?? "N",
                         x.LockStatus,
                         x.CreatedBy,
                         x.CreatedOn,

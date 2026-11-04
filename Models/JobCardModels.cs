@@ -20,9 +20,19 @@ namespace EMSAPI.Models
         public int RMPartNo { get; set; }
         public string? RMGrade { get; set; }
         public decimal RMQty { get; set; }
-        public string? Operator { get; set; }
-        public string? Shift { get; set; }
+        public string? Operator { get; set; }          // may be blank when PlanId > 0
+        public string? Shift { get; set; }             // may be blank when PlanId > 0
         public string? Remarks { get; set; }
+        // Production Plan link (SQL 58). Set by the plan release; a job card
+        // with PlanId > 0 keeps its OA line, part, grade, route, qty, RM,
+        // machine, die and planned dates (change them through Reschedule).
+        public int PlanId { get; set; }
+        public int PlanJobSeq { get; set; }
+        public int PlanLineSlNo { get; set; }
+        public DateTime? PlannedStart { get; set; }
+        public DateTime? PlannedEnd { get; set; }
+        public int MachineNo { get; set; }
+        public int DieNo { get; set; }
         public int UserNo { get; set; }
         public int SubscID { get; set; }
         public string Status { get; set; } = "Insert";
@@ -41,6 +51,11 @@ namespace EMSAPI.Models
         public decimal IdleMin { get; set; }
         public decimal Qty { get; set; }
         public string? Remarks { get; set; }
+        // SQL 58: who ran it, why it stood idle, what came out rejected.
+        public string? Operator { get; set; }
+        public string? Shift { get; set; }
+        public string? IdleReason { get; set; }
+        public decimal RejectedQty { get; set; }
         public int UserNo { get; set; }
     }
 
@@ -65,6 +80,7 @@ namespace EMSAPI.Models
         public decimal OKQty { get; set; }
         public decimal ReworkQty { get; set; }
         public decimal RejectedQty { get; set; }
+        public string? RejectionReason { get; set; }   // Other Master 'Rejection Reason' (SQL 58)
         public string? Remarks { get; set; }
         public int CreatedBy { get; set; }
         public int SubscID { get; set; }

@@ -226,6 +226,11 @@ namespace EMSAPI.Models
         public string? AmdMode { get; set; }
         public int? POID { get; set; }
 
+        // Production planning (SQL 58)
+        public DateTime? CommittedDate { get; set; }    // null = use DeliveryDate
+        public string? Priority { get; set; }           // Normal / Urgent
+        public string? CustomerMaterial { get; set; }   // Y / N
+
         public string? SystemIP { get; set; }
         public int? CreatedBy { get; set; }
         public DateTime? CreatedOn { get; set; }
@@ -287,6 +292,11 @@ namespace EMSAPI.Models
         public int? AmdNo { get; set; }
         public string? AmdMode { get; set; }
         public int? POID { get; set; }
+
+        // Production planning (SQL 58) — saved by SP_OADtlPlanFields.
+        public DateTime? CommittedDate { get; set; }    // null = use DeliveryDate
+        public string? Priority { get; set; }           // Normal / Urgent; null = keep
+        public string? CustomerMaterial { get; set; }   // Y / N; null = keep
 
         public string? SystemIP { get; set; }
         public int? CreatedBy { get; set; }

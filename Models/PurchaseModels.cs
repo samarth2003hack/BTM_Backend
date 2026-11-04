@@ -83,6 +83,7 @@ namespace EMSAPI.Models
         // MaterialGrade of the part (SQL/40): GradeNo + its name.
         public int? GradeNo { get; set; }
         public string? Grade { get; set; }
+        public DateTime? RequiredBy { get; set; }    // SQL 58; null = header due date
         public string? SystemIP { get; set; }
         public int? CreatedBy { get; set; }
         public DateTime? CreatedOn { get; set; }
@@ -110,6 +111,8 @@ namespace EMSAPI.Models
         // re-reads the name from the master.
         public int? GradeNo { get; set; }
         public string? Grade { get; set; }
+        // Line need-by date (SQL 58, SP_PurReqDtlPlanFields); null = header due date.
+        public DateTime? RequiredBy { get; set; }
         public string? SystemIP { get; set; }
         public int? CreatedBy { get; set; }
         public DateTime? CreatedOn { get; set; }

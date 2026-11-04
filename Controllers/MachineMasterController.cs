@@ -22,7 +22,10 @@ namespace EMSAPI.Controllers
         // ============================================================
         // SAVE / UPDATE
         // Body: { mTransNo, machineCode, machineName, operations: [int],
-        //         remarks, lockStatus, createdBy, subscID, status }
+        //         remarks, lockStatus, createdBy, subscID, status,
+        //         capacityUnit, shiftsPerDay, efficiencyPct,
+        //         minPieceWt, maxPieceWt }   (planning fields, SQL 58;
+        //         an absent planning field keeps its stored value)
         // ============================================================
 
         [HttpPost("SaveData")]
@@ -47,6 +50,7 @@ namespace EMSAPI.Controllers
 
             try
             {
+                await using var tx = await db.Database.BeginTransactionAsync();
                 var now = DateTime.Now;
                 var result = await db.CallMachineMstSP(new SP_MachineMst
                 {
@@ -67,6 +71,15 @@ namespace EMSAPI.Controllers
                 });
 
                 if (result.ID == 0) return ConflictResult(result.Message);
+
+                // Planning fields (hammer rate and fit) — SQL 58.
+                var plan = await db.CallMachinePlanFieldsSP(result.ID,
+                    dto.CapacityUnit == null ? null : dto.CapacityUnit.Trim(),
+                    dto.ShiftsPerDay, dto.EfficiencyPct, dto.MinPieceWt, dto.MaxPieceWt,
+                    userNo, dto.SubscID);
+                if (plan.ID == 0) return ConflictResult(plan.Message);
+
+                await tx.CommitAsync();
                 return OkResult($"OK^{result.ID}", result.Message);
             }
             catch (Exception ex) { return ErrorResult(ex); }
@@ -181,6 +194,11 @@ namespace EMSAPI.Controllers
                        ISNULL(m.Remarks, '')               AS remarks,
                        m.DateofInst                        AS dateofInst,
                        m.Capacity                          AS capacity,
+                       ISNULL(m.CapacityUnit, '')          AS capacityUnit,
+                       ISNULL(m.ShiftsPerDay, 1)           AS shiftsPerDay,
+                       ISNULL(m.EfficiencyPct, 100)        AS efficiencyPct,
+                       ISNULL(m.MinPieceWt, 0)             AS minPieceWt,
+                       ISNULL(m.MaxPieceWt, 0)             AS maxPieceWt,
                        m.LockStatus                        AS lockStatus,
                        CONVERT(char(10), m.CreatedOn, 23)  AS createdOn,
                        (SELECT COUNT(*)
@@ -224,6 +242,11 @@ namespace EMSAPI.Controllers
                     operation = r["operation"],
                     dateofInst = r["dateofInst"] == DBNull.Value ? (DateTime?)null : Convert.ToDateTime(r["dateofInst"]),
                     capacity = r["capacity"] == DBNull.Value ? (decimal?)null : Convert.ToDecimal(r["capacity"]),
+                    capacityUnit = r["capacityUnit"],
+                    shiftsPerDay = Convert.ToInt32(r["shiftsPerDay"]),
+                    efficiencyPct = Convert.ToDecimal(r["efficiencyPct"]),
+                    minPieceWt = Convert.ToDecimal(r["minPieceWt"]),
+                    maxPieceWt = Convert.ToDecimal(r["maxPieceWt"]),
                     lockStatus = r["lockStatus"],
                     remarks = r["remarks"],
                     createdOn = r["createdOn"],
@@ -248,6 +271,12 @@ namespace EMSAPI.Controllers
         public string? MachineName { get; set; }
         public DateTime? DateofInst { get; set; }
         public decimal? Capacity { get; set; }
+        // Planning (SQL 58) — null keeps the stored value.
+        public string? CapacityUnit { get; set; }
+        public int? ShiftsPerDay { get; set; }
+        public decimal? EfficiencyPct { get; set; }
+        public decimal? MinPieceWt { get; set; }
+        public decimal? MaxPieceWt { get; set; }
         public List<int>? Operations { get; set; }   // preferred: array of int ids
         public string? Operation { get; set; }   // fallback: comma-separated string
         public string? Remarks { get; set; }

@@ -219,7 +219,8 @@ namespace EMSAPI.Models
         public int SlNo { get; set; }
         public int OperationNo { get; set; }   // OtherMaster.MTransNo
         public int MachineNo { get; set; }
-        public decimal TimeMin { get; set; }
+        public decimal TimeMin { get; set; }   // minutes per batch
+        public decimal? SetupMin { get; set; } // die-setup minutes (SQL 58)
     }
 
     public class RoutingChartSaveDtlRequest

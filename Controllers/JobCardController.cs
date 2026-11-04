@@ -25,7 +25,9 @@ namespace EMSAPI.Controllers
         /// <summary>
         /// One row per live job card, decorated with everything the three
         /// pages show: product, route, OA, status, progress, inspection
-        /// position and raw-material issue. Filter with a WHERE on alias j.
+        /// position, raw-material issue and the Production Plan link (SQL 58).
+        /// Filter with a WHERE on alias j. Run it through JobCardSql(): the
+        /// {PlanNo} slot reads ProductionPlanMst (SQL 59) only once it exists.
         /// </summary>
         protected const string JobCardSelect = @"
             SELECT  j.MTransNo                              AS mTransNo,
@@ -57,6 +59,18 @@ namespace EMSAPI.Controllers
                     j.Operator                              AS operator,
                     j.Shift                                 AS shift,
                     j.Remarks                               AS remarks,
+                    ISNULL(j.PlanID, 0)                     AS planId,
+                    {PlanNo}                                AS planNo,
+                    ISNULL(j.PlanJobSeq, 0)                 AS planJobSeq,
+                    ISNULL(j.PlanLineSlNo, 0)               AS planLineSlNo,
+                    CONVERT(char(10), j.PlannedStart, 23)   AS plannedStart,
+                    CONVERT(char(10), j.PlannedEnd, 23)     AS plannedEnd,
+                    ISNULL(j.MachineNo, 0)                  AS machineNo,
+                    mc.MachineCode                          AS machineCode,
+                    mc.MachineName                          AS machineName,
+                    ISNULL(j.DieNo, 0)                      AS dieNo,
+                    dp.PartCode                             AS dieCode,
+                    dp.PartName                             AS dieName,
                     s.JobStatus                             AS status,
                     s.StepCount                             AS stepCount,
                     s.TotalTimeMin                          AS totalTimeMin,
@@ -83,6 +97,9 @@ namespace EMSAPI.Controllers
               LEFT JOIN dbo.PartMaster p        ON p.MTransNo  = j.PartNo
               LEFT JOIN dbo.PartMaster rp       ON rp.MTransNo = j.RMPartNo
               LEFT JOIN dbo.RoutingChartMst r   ON r.MTransNo  = j.RouteNo
+              LEFT JOIN dbo.MachineMst mc       ON mc.MTransNo = j.MachineNo
+              LEFT JOIN dbo.DieMst dm           ON dm.MTransNo = j.DieNo
+              LEFT JOIN dbo.PartMaster dp       ON dp.MTransNo = dm.PartNo
               OUTER APPLY (SELECT TOP (1) o.MTransNo FROM dbo.OtherMaster o
                             WHERE o.MasterType = 'Die Type' AND o.SubscID = j.SubscID
                               AND o.DeleteStatus = 'N' AND o.MasterName = r.DieType
@@ -160,9 +177,23 @@ namespace EMSAPI.Controllers
             }
         }
 
+        private static bool planTableSeen;
+
+        /// <summary>JobCardSelect with its plan-number slot filled: the plan's
+        /// PlanNo once ProductionPlanMst exists (SQL 59), NULL before that.</summary>
+        protected async Task<string> JobCardSql()
+        {
+            if (!planTableSeen)
+                planTableSeen = I(await QueryOne(
+                    "SELECT CASE WHEN OBJECT_ID(N'dbo.ProductionPlanMst', N'U') IS NULL THEN 0 ELSE 1 END AS ok"), "ok") == 1;
+            return JobCardSelect.Replace("{PlanNo}", planTableSeen
+                ? "(SELECT TOP (1) pp.PlanNo FROM dbo.ProductionPlanMst pp WHERE pp.MTransNo = j.PlanID)"
+                : "CAST(NULL AS varchar(30))");
+        }
+
         /// <summary>One decorated job card, or null.</summary>
-        protected Task<Dictionary<string, object?>?> JobCardRow(int mTransNo) =>
-            QueryOne(JobCardSelect + " AND j.MTransNo = @MTransNo", Int("@MTransNo", mTransNo));
+        protected async Task<Dictionary<string, object?>?> JobCardRow(int mTransNo) =>
+            await QueryOne(await JobCardSql() + " AND j.MTransNo = @MTransNo", Int("@MTransNo", mTransNo));
 
         protected static SqlParameter Int(string name, int value) =>
             new(name, SqlDbType.Int) { Value = value };
@@ -215,7 +246,12 @@ namespace EMSAPI.Controllers
     ///   - the OA line (live, current revision; OA ID = OADtl.SlNo) must order the product;
     ///   - the raw material must be a grade-carrying part; when the product has a
     ///     Conversion BOM the raw material must be one of its lines;
-    ///   - a job card can be edited or deleted only while Open (no production entries).
+    ///   - a job card can be edited or deleted only while Open (no production entries);
+    ///   - a job card released from a Production Plan (PlanID &gt; 0, SQL 58) may be
+    ///     saved without operator / shift, and only its job date, operator, shift
+    ///     and remarks may change here - OA line, part, grade, route, qty, raw
+    ///     material, machine, die and planned dates move through Reschedule in
+    ///     the Production Plan.
     /// </summary>
     [Route("api/[controller]")]
     public class JobCardController : JobCardControllerBase
@@ -227,12 +263,16 @@ namespace EMSAPI.Controllers
         // ============================================================
 
         [HttpGet("GetList/{subscID}")]
-        public Task<IActionResult> GetList(int subscID)
+        public async Task<IActionResult> GetList(int subscID)
         {
             if (subscID <= 0)
-                return Task.FromResult(BadRequestResult("Invalid Subscription."));
-            return RunQuery(JobCardSelect + " AND j.SubscID = @SubscID ORDER BY j.MTransNo DESC",
-                Int("@SubscID", subscID));
+                return BadRequestResult("Invalid Subscription.");
+            try
+            {
+                return await RunQuery(await JobCardSql() + " AND j.SubscID = @SubscID ORDER BY j.MTransNo DESC",
+                    Int("@SubscID", subscID));
+            }
+            catch (Exception ex) { return ErrorResult(ex); }
         }
 
         [HttpGet("GetMasterData")]
@@ -352,6 +392,44 @@ namespace EMSAPI.Controllers
 
             try
             {
+                await using var tx = await db.Database.BeginTransactionAsync();
+
+                // ── A job card released from a Production Plan ─────────
+                if (isUpdate)
+                {
+                    var cur = await QueryOne(@"
+                        SELECT j.JobCardNo, j.OAYear, j.OANo, j.OAID, ISNULL(j.OALinkNo, 0) AS OALinkNo,
+                               j.PartNo, ISNULL(j.GradeNo, 0) AS GradeNo, j.Grade, j.RouteNo, j.Qty,
+                               j.RMPartNo, ISNULL(j.RMGradeNo, 0) AS RMGradeNo, j.RMGrade, j.RMQty, j.RMUnit,
+                               ISNULL(j.PlanID, 0) AS PlanID, ISNULL(j.MachineNo, 0) AS MachineNo,
+                               ISNULL(j.DieNo, 0) AS DieNo, j.PlannedStart, j.PlannedEnd
+                          FROM dbo.JobCardMst j WITH (UPDLOCK, ROWLOCK)
+                         WHERE j.MTransNo = @M AND j.SubscID = @S AND j.DeleteStatus = 'N'",
+                        Int("@M", r.MTransNo), Int("@S", r.SubscID));
+                    if (cur == null) return NotFoundResult("Job card not found.");
+                    if (I(cur, "PlanID") > 0)
+                    {
+                        var refused = await SavePlanJobCard(r, cur);
+                        if (refused != null) return refused;
+                        await tx.CommitAsync();
+                        return OkResult($"OK^{r.MTransNo}", "Record Edited Successfully");
+                    }
+                }
+                else if (r.PlanId > 0)
+                {
+                    // One job card per plan line (the plan release creates them).
+                    var dup = await QueryOne(@"
+                        SELECT TOP (1) JobCardNo FROM dbo.JobCardMst
+                         WHERE SubscID = @S AND DeleteStatus = 'N' AND PlanID = @P
+                           AND ISNULL(PlanJobSeq, 0) = @Q AND ISNULL(PlanLineSlNo, 0) = @L",
+                        Int("@S", r.SubscID), Int("@P", r.PlanId), Int("@Q", r.PlanJobSeq), Int("@L", r.PlanLineSlNo));
+                    if (dup != null)
+                        return ConflictResult($"This plan line already has job card {S(dup, "JobCardNo")}.");
+                }
+
+                // A hand-made job card cannot be tied to a plan afterwards.
+                var planId = isUpdate ? 0 : r.PlanId;
+
                 // ── Product and route ──────────────────────────────────
                 var part = await QueryOne(@"SELECT PartCode FROM dbo.PartMaster
                                              WHERE MTransNo = @P AND SubscID = @S AND DeleteStatus = 'N'",
@@ -400,8 +478,9 @@ namespace EMSAPI.Controllers
                 if (rmGrade == null)
                     return ConflictResult($"{r.RMGrade!.Trim()} is not a grade of {S(rm, "PartCode")}.");
                 if (r.RMQty <= 0) return ConflictResult("RM Quantity must be greater than zero.");
-                if (string.IsNullOrWhiteSpace(r.Operator)) return ConflictResult("Operator Name is required.");
-                if (string.IsNullOrWhiteSpace(r.Shift)) return ConflictResult("Shift is required.");
+                // A plan-released job card gets its operator and shift when production starts.
+                if (planId <= 0 && string.IsNullOrWhiteSpace(r.Operator)) return ConflictResult("Operator Name is required.");
+                if (planId <= 0 && string.IsNullOrWhiteSpace(r.Shift)) return ConflictResult("Shift is required.");
 
                 var result = await db.CallJobCardMstSP(new SP_JobCardMst
                 {
@@ -422,8 +501,8 @@ namespace EMSAPI.Controllers
                     RMGrade = rmGrade.Value.Grade,
                     RMQty = Math.Round(r.RMQty, 3),
                     RMUnit = S(rm, "Unit"),
-                    Operator = r.Operator!.Trim(),
-                    Shift = r.Shift!.Trim(),
+                    Operator = (r.Operator ?? "").Trim(),
+                    Shift = (r.Shift ?? "").Trim(),
                     Remarks = string.IsNullOrWhiteSpace(r.Remarks) ? null : r.Remarks.Trim(),
                     SystemIP = ClientIp,
                     UserNo = r.UserNo,
@@ -431,9 +510,85 @@ namespace EMSAPI.Controllers
                 });
 
                 if (result.ID == 0) return ConflictResult(result.Message);
+
+                // Plan link, hammer, die and planned dates (SQL 58).
+                var plan = await db.CallJobCardPlanFieldsSP(result.ID, planId,
+                    planId > 0 ? r.PlanJobSeq : 0, planId > 0 ? r.PlanLineSlNo : 0,
+                    r.PlannedStart, r.PlannedEnd, r.MachineNo, r.DieNo, r.UserNo, r.SubscID);
+                if (plan.ID == 0) return ConflictResult(plan.Message);
+
+                await tx.CommitAsync();
                 return OkResult($"OK^{result.ID}", isUpdate ? "Record Edited Successfully" : "Record Saved Successfully");
             }
             catch (Exception ex) { return ErrorResult(ex); }
+        }
+
+        /// <summary>
+        /// Update of a job card released from a Production Plan. Only the job
+        /// date, operator, shift and remarks may change; anything else that
+        /// differs from the stored card is refused (409). Machine, die and the
+        /// planned dates count as unchanged when the caller leaves them out.
+        /// Returns null when saved, else the refusal.
+        /// </summary>
+        private async Task<IActionResult?> SavePlanJobCard(JobCardSaveRequest r, Dictionary<string, object?> cur)
+        {
+            static DateTime? DateOf(object? v) => v == null ? null : Convert.ToDateTime(v).Date;
+            static bool Same(string? a, string? b) =>
+                string.Equals((a ?? "").Trim(), (b ?? "").Trim(), StringComparison.OrdinalIgnoreCase);
+
+            var changed = new List<string>();
+            if (r.OAYear != I(cur, "OAYear") || r.OANo != I(cur, "OANo") || r.OAID != I(cur, "OAID")) changed.Add("OA line");
+            if (r.PartNo != I(cur, "PartNo")) changed.Add("product");
+            if (!Same(r.Grade, S(cur, "Grade"))) changed.Add("grade");
+            if (r.RouteNo != I(cur, "RouteNo")) changed.Add("route");
+            if (r.Qty != D(cur, "Qty")) changed.Add("quantity");
+            if (r.RMPartNo != I(cur, "RMPartNo")) changed.Add("raw material");
+            if (!Same(r.RMGrade, S(cur, "RMGrade"))) changed.Add("RM grade");
+            if (Math.Round(r.RMQty, 3) != D(cur, "RMQty")) changed.Add("RM quantity");
+            if (r.MachineNo > 0 && r.MachineNo != I(cur, "MachineNo")) changed.Add("machine");
+            if (r.DieNo > 0 && r.DieNo != I(cur, "DieNo")) changed.Add("die");
+            if ((r.PlannedStart != null && r.PlannedStart.Value.Date != DateOf(cur["PlannedStart"])) ||
+                (r.PlannedEnd != null && r.PlannedEnd.Value.Date != DateOf(cur["PlannedEnd"])))
+                changed.Add("planned dates");
+
+            if (changed.Count > 0)
+            {
+                var planNo = S(await QueryOne(await JobCardSql() + " AND j.MTransNo = @MTransNo",
+                    Int("@MTransNo", r.MTransNo)), "planNo");
+                if (planNo == "") planNo = "Plan " + I(cur, "PlanID");
+                return ConflictResult(
+                    $"{S(cur, "JobCardNo")} was released from Production Plan {planNo} - its {string.Join(", ", changed)} " +
+                    "cannot be changed here. Change dates / qty through Reschedule in the Production Plan.");
+            }
+            if (r.JobDate == null) return ConflictResult("Job Card Date is required.");
+
+            var result = await db.CallJobCardMstSP(new SP_JobCardMst
+            {
+                Status = "Update",
+                MTransNo = r.MTransNo,
+                JobDate = r.JobDate.Value.Date,
+                OAYear = I(cur, "OAYear"),
+                OANo = I(cur, "OANo"),
+                OAID = I(cur, "OAID"),
+                OALinkNo = I(cur, "OALinkNo"),
+                PartNo = I(cur, "PartNo"),
+                GradeNo = I(cur, "GradeNo"),
+                Grade = S(cur, "Grade"),
+                RouteNo = I(cur, "RouteNo"),
+                Qty = D(cur, "Qty"),
+                RMPartNo = I(cur, "RMPartNo"),
+                RMGradeNo = I(cur, "RMGradeNo"),
+                RMGrade = S(cur, "RMGrade"),
+                RMQty = D(cur, "RMQty"),
+                RMUnit = S(cur, "RMUnit"),
+                Operator = (r.Operator ?? "").Trim(),
+                Shift = (r.Shift ?? "").Trim(),
+                Remarks = string.IsNullOrWhiteSpace(r.Remarks) ? null : r.Remarks.Trim(),
+                SystemIP = ClientIp,
+                UserNo = r.UserNo,
+                SubscID = r.SubscID,
+            });
+            return result.ID == 0 ? ConflictResult(result.Message) : null;
         }
 
         [HttpPost("RecDelete")]

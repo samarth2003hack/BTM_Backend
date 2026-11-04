@@ -20,7 +20,9 @@ namespace EMSAPI.Controllers
     /// step when the route has none). The pieces inspected across all its
     /// inspections may never exceed what reached that step; each inspection
     /// splits into OK + Rework + Rejected = Inspected. SP_JobCardInspection
-    /// re-checks the cap under a lock.
+    /// re-checks the cap under a lock. Rejected pieces carry a reason from
+    /// Other Master 'Rejection Reason' (SQL 58) — required whenever that list
+    /// has rows for the subscription.
     /// </summary>
     [Route("api/[controller]")]
     public class JobCardInspectionController : JobCardControllerBase
@@ -43,6 +45,7 @@ namespace EMSAPI.Controllers
                     x.OKQty                             AS okQty,
                     x.ReworkQty                         AS reworkQty,
                     x.RejectedQty                       AS rejectedQty,
+                    ISNULL(x.RejectionReason, '')       AS rejectionReason,
                     x.Remarks                           AS remarks,
                     CONVERT(char(10), x.CreatedOn, 23)  AS createdOn
               FROM  dbo.JobCardInspection x
@@ -113,8 +116,20 @@ namespace EMSAPI.Controllers
                 return ConflictResult(
                     $"OK + Rework + Rejected ({Q(r.OKQty + r.ReworkQty + r.RejectedQty)}) must equal the Inspected Quantity ({Q(r.InspectedQty)}).");
 
+            var reason = r.RejectedQty > 0 ? (r.RejectionReason ?? "").Trim() : "";
+            if (reason.Length > 100) reason = reason[..100];
+
             try
             {
+                if (r.RejectedQty > 0 && reason == "")
+                {
+                    var reasons = await QueryOne(@"
+                        SELECT COUNT(*) AS N FROM dbo.OtherMaster
+                         WHERE MasterType = 'Rejection Reason' AND SubscID = @S
+                           AND DeleteStatus = 'N' AND LockStatus = 'Y'", Int("@S", r.SubscID));
+                    if (I(reasons, "N") > 0) return ConflictResult("Select the Rejection Reason for the rejected pieces.");
+                }
+
                 // A friendlier refusal than the SP's when the cap is exceeded.
                 var jc = await JobCardRow(r.JobCardNo);
                 if (jc == null || I(jc, "mTransNo") == 0) return ConflictResult("Select a job card.");
@@ -145,6 +160,14 @@ namespace EMSAPI.Controllers
                     SubscID = r.SubscID,
                 });
                 if (result.ID == 0) return ConflictResult(result.Message);
+
+                // Rejection reason (SQL 58). Not wrapped in one transaction with the
+                // save: SP_JobCardInspection rolls back its own transaction when it
+                // refuses, which would abort an outer one. This is a one-row update
+                // of the row just written.
+                var plan = await db.CallJobCardInspectionPlanFieldsSP(result.ID, reason, r.CreatedBy, r.SubscID);
+                if (plan.ID == 0) return ConflictResult(plan.Message);
+
                 return OkResult($"OK^{result.ID}", isUpdate ? "Record Edited Successfully" : "Record Saved Successfully");
             }
             catch (Exception ex) { return ErrorResult(ex); }

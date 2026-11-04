@@ -26,7 +26,9 @@ namespace EMSAPI.Controllers
         // ============================================================
         // SAVE MASTER DATA — the route header
         // Body: { mTransNo, partNo, grade (text) | gradeNo, routeName,
-        //         batchQty, userNo, subscID, status }
+        //         batchQty, postForgeDays, userNo, subscID, status }
+        // postForgeDays (SQL 58): working days after forging until the
+        // part is ready to pack; absent = keep.
         // ============================================================
 
         [HttpPost("SaveMasterData")]
@@ -65,6 +67,7 @@ namespace EMSAPI.Controllers
                 if (gradeNo <= 0)
                     return ConflictResult("Grade is required.");
 
+                await using var tx = await db.Database.BeginTransactionAsync();
                 var now = DateTime.Now;
                 var result = await db.CallRoutingChartMstSP(new SP_RoutingChartMst
                 {
@@ -84,6 +87,16 @@ namespace EMSAPI.Controllers
                 });
 
                 if (result.ID == 0) return ConflictResult(result.Message);
+
+                // Planning: post-forge days (SQL 58). On insert an absent value is 0.
+                var postForge = dto.PostForgeDays ?? (isUpdate ? (int?)null : 0);
+                if (postForge != null)
+                {
+                    var plan = await db.CallRoutingChartPlanFieldsSP(result.ID, postForge, null, userNo, dto.SubscID);
+                    if (plan.ID == 0) return ConflictResult(plan.Message);
+                }
+
+                await tx.CommitAsync();
                 return OkResult($"OK^{result.ID}", result.Message);
             }
             catch (Exception ex) { return ErrorResult(ex); }
@@ -91,8 +104,10 @@ namespace EMSAPI.Controllers
 
         // ============================================================
         // SAVE DTL DATA — replaces the route's whole step list atomically
-        // Body: { mTransNo, steps: [{ slNo, operationNo, machineNo, timeMin }],
-        //         userNo, subscID }   (serial order = array order)
+        // Body: { mTransNo, steps: [{ slNo, operationNo, machineNo, timeMin,
+        //         setupMin }], userNo, subscID }   (serial order = array order)
+        // timeMin = minutes PER BATCH of the route's batchQty; setupMin =
+        // die-setup minutes (SQL 58), saved even when the steps are unchanged.
         // ============================================================
 
         [HttpPost("SaveDtlData")]
@@ -118,8 +133,16 @@ namespace EMSAPI.Controllers
                     timeMin     = s.TimeMin
                 }));
 
+                await using var tx = await db.Database.BeginTransactionAsync();
                 var result = await db.CallRoutingChartStepsSP(req.MTransNo, json, req.UserNo, subscID);
                 if (result.ID == 0) return ConflictResult(result.Message);
+
+                // Setup minutes per step, same order (SQL 58).
+                var setupJson = JsonSerializer.Serialize((req.Steps ?? new()).Select(s => new { setupMin = s.SetupMin ?? 0m }));
+                var plan = await db.CallRoutingChartPlanFieldsSP(req.MTransNo, null, setupJson, req.UserNo, subscID);
+                if (plan.ID == 0) return ConflictResult(plan.Message);
+
+                await tx.CommitAsync();
                 return OkResult($"OK^{result.ID}", result.Message);
             }
             catch (Exception ex) { return ErrorResult(ex); }
@@ -163,7 +186,7 @@ namespace EMSAPI.Controllers
         // ============================================================
         // GET LIST
         // Row: { mTransNo, id, partNo, partCode, partName, grade, gradeNo,
-        //        routeName, batchQty, dieType, dieTypeName, dieTypeNo,
+        //        routeName, batchQty, postForgeDays, dieType, dieTypeName, dieTypeNo,
         //        stepCount, totalTimeMin, sequence ("Cutting → Heating → …"),
         //        jobCardCount, lockStatus, createdOn }
         // ============================================================
@@ -210,7 +233,7 @@ namespace EMSAPI.Controllers
         // ============================================================
         // GET DETAILS LIST — GetDetailsList?MTransNo=[&SubscID=]
         // Steps by SlNo: { transSlNo, slNo, operationNo, operationName,
-        //                  machineNo, machineCode, machineName, timeMin }
+        //                  machineNo, machineCode, machineName, timeMin, setupMin }
         // ============================================================
 
         [HttpGet("GetDetailsList")]
@@ -230,7 +253,8 @@ namespace EMSAPI.Controllers
                            d.MachineNo                    AS machineNo,
                            ISNULL(m.MachineCode, '')      AS machineCode,
                            ISNULL(m.MachineName, '')      AS machineName,
-                           ISNULL(d.TimeMin, 0)           AS timeMin
+                           ISNULL(d.TimeMin, 0)           AS timeMin,
+                           ISNULL(d.SetupMin, 0)          AS setupMin
                       FROM dbo.RoutingChartDtl d
                       LEFT JOIN dbo.OtherMaster om ON om.MTransNo = d.Operation
                       LEFT JOIN dbo.MachineMst  m  ON m.MTransNo  = d.MachineNo
@@ -272,6 +296,7 @@ namespace EMSAPI.Controllers
                        h.GradeNo                           AS gradeNo,
                        h.RouteName                         AS routeName,
                        h.BatchQty                          AS batchQty,
+                       ISNULL(h.PostForgeDays, 0)          AS postForgeDays,
                        ISNULL(dt.DieType, '')              AS dieType,
                        ISNULL(dt.DieType, '')              AS dieTypeName,
                        ISNULL(t.MTransNo, 0)               AS dieTypeNo,

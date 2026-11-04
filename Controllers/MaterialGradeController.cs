@@ -35,11 +35,19 @@ namespace EMSAPI.Controllers
             {
                 dto.SystemIP = ClientIp;
 
+                await using var tx = await db.Database.BeginTransactionAsync();
                 var result = await db.CallMaterialGradeSP(dto);
 
                 if (result.ID == 0)
                     return ConflictResult(result.Message);
 
+                // Safety stock and purchase lead time of the grade (SQL 58).
+                var plan = await db.CallMaterialGradePlanFieldsSP(result.ID, dto.SafetyStock, dto.LeadTimeDays,
+                    dto.CreatedBy, dto.SubscID);
+                if (plan.ID == 0)
+                    return ConflictResult(plan.Message);
+
+                await tx.CommitAsync();
                 return OkResult(new { ID = result.ID }, result.Message);
             }
             catch (Exception ex)
@@ -72,6 +80,8 @@ namespace EMSAPI.Controllers
                         x.MinStock,
                         x.MaxStock,
                         x.MOQ,
+                        SafetyStock = x.SafetyStock ?? 0,
+                        LeadTimeDays = x.LeadTimeDays ?? 0,
                         x.LockStatus,
                         x.CreatedBy,
                         x.CreatedOn,
@@ -126,7 +136,8 @@ namespace EMSAPI.Controllers
                                 x.DeleteStatus == "N" &&
                                 x.LockStatus == "Y")
                     .OrderBy(x => x.GradeNo)
-                    .Select(x => new { x.MTransNo, x.GradeNo, x.Grade, x.MinStock, x.MaxStock, x.MOQ })
+                    .Select(x => new { x.MTransNo, x.GradeNo, x.Grade, x.MinStock, x.MaxStock, x.MOQ,
+                                       SafetyStock = x.SafetyStock ?? 0, LeadTimeDays = x.LeadTimeDays ?? 0 })
                     .ToListAsync();
 
                 return OkResult(data);
