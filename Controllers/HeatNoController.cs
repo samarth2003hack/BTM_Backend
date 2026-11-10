@@ -608,13 +608,69 @@ namespace EMSAPI.Controllers
         public async Task<IActionResult> DtlGetByPart(
             [FromQuery] int partNo,
             [FromQuery] int subscID,
-            [FromQuery] string? grade = null)
+            [FromQuery] string? grade = null,
+            [FromQuery] int oaYear = 0,
+            [FromQuery] int oaNo = 0,
+            [FromQuery] int oaId = 0)
         {
             if (partNo <= 0) return BadRequestResult("Part No is required.");
             if (subscID <= 0) return BadRequestResult("Invalid Subscription.");
 
             try
             {
+                // Customer-material OA line (SQL 58 / 67): the heats are the ones
+                // the customer sent on that OA, with what is left of each.
+                if (oaYear > 0 && oaNo > 0 && oaId > 0)
+                {
+                    var flag = await db.PmQueryRowsAsync(@"
+                        SELECT TOP (1) ISNULL(d.CustomerMaterial, 'N') AS cm
+                          FROM dbo.OAMst m
+                          JOIN dbo.OADtl d ON d.MTransNo = m.MTransNo AND d.DeleteStatus = 'N'
+                         WHERE m.SubscID = @SubscID AND m.DocYear = @OAYear AND m.DocNo = @OANo
+                           AND m.DeleteStatus = 'N' AND m.DocAmdStatus = 'N' AND CAST(d.SlNo AS INT) = @OAID
+                         ORDER BY m.MTransNo DESC",
+                        new SqlParameter("@SubscID", subscID), new SqlParameter("@OAYear", oaYear),
+                        new SqlParameter("@OANo", oaNo), new SqlParameter("@OAID", oaId));
+                    if (flag.Count > 0 && Convert.ToString(flag[0]["cm"]) == "Y")
+                    {
+                        var cust = await db.PmQueryRowsAsync("""
+                            SELECT UPPER(LTRIM(RTRIM(d.HeatNo)))         AS heatNo,
+                                   ISNULL(d.TCNo, '')                    AS tcNo,
+                                   CAST(NULL AS char(10))                AS tcDate,
+                                   LTRIM(RTRIM(ISNULL(d.Grade, '')))     AS grade,
+                                   ISNULL(NULLIF(d.Unit, ''), 'KG')      AS unit,
+                                   SUM(d.Qty)                            AS qty,
+                                   ISNULL(MAX(iss.q), 0)                 AS issuedQty,
+                                   SUM(d.Qty) - ISNULL(MAX(iss.q), 0)    AS balanceQty,
+                                   MAX(m.InwardNo)                       AS grnNo,
+                                   0                                     AS grnTransNo,
+                                   MAX(m.InwardNo)                       AS heatDocNo,
+                                   MIN(d.TransSlNo)                      AS transSlNo,
+                                   'Customer'                            AS source
+                              FROM dbo.CustMatInwardDtl d
+                              JOIN dbo.CustMatInwardMst m ON m.MTransNo = d.MTransNo AND m.DeleteStatus = 'N' AND m.DocType = 'I'
+                             OUTER APPLY (SELECT SUM(i.Qty) AS q
+                                            FROM dbo.StoreIssueDtl i
+                                            JOIN dbo.StoreIssueMst im ON im.MTransNo = i.MTransNo AND im.DeleteStatus = 'N'
+                                           WHERE i.DeleteStatus = 'N' AND i.MaterialSource = 'C' AND i.PartNo = d.PartNo
+                                             AND i.OAYear = m.OAYear AND i.OANo = m.OANo
+                                             AND UPPER(LTRIM(RTRIM(i.HeatNo))) = UPPER(LTRIM(RTRIM(d.HeatNo)))) iss
+                             WHERE m.SubscID = @SubscID AND d.DeleteStatus = 'N' AND d.PartNo = @PartNo
+                               AND m.OAYear = @OAYear AND m.OANo = @OANo
+                               AND LTRIM(RTRIM(ISNULL(d.HeatNo, ''))) <> ''
+                               AND (@Grade = '' OR LTRIM(RTRIM(ISNULL(d.Grade, ''))) IN ('', @Grade))
+                             GROUP BY UPPER(LTRIM(RTRIM(d.HeatNo))), ISNULL(d.TCNo, ''), LTRIM(RTRIM(ISNULL(d.Grade, ''))), ISNULL(NULLIF(d.Unit, ''), 'KG')
+                             ORDER BY MIN(d.TransSlNo)
+                            """,
+                            new SqlParameter("@PartNo",  SqlDbType.Int) { Value = partNo },
+                            new SqlParameter("@SubscID", SqlDbType.Int) { Value = subscID },
+                            new SqlParameter("@OAYear",  SqlDbType.Int) { Value = oaYear },
+                            new SqlParameter("@OANo",    SqlDbType.Int) { Value = oaNo },
+                            new SqlParameter("@Grade",   SqlDbType.VarChar, 50) { Value = (grade ?? "").Trim() });
+                        return OkResult(cust, cust.Count > 0 ? "Data found." : "No heats received from the customer for this part on this OA.");
+                    }
+                }
+
                 var data = await db.PmQueryRowsAsync("""
                     SELECT UPPER(LTRIM(RTRIM(d.HeatNo)))              AS heatNo,
                            ISNULL(d.TCNo, '')                         AS tcNo,

@@ -161,12 +161,14 @@ namespace EMSAPI.Models
                 PfInt("@SubscID", subscID));
 
         // ── SP_StoreIssueDtlPlanFields — heat no ('' = none; else approved) ──
+        /// <param name="materialSource">'O' our bar, 'C' customer bar (SQL 67); null keeps the line's.</param>
         public Task<(int ID, string Message)> CallStoreIssueDtlPlanFieldsSP(
-            int transSlNo, string? heatNo, int userNo, int subscID) =>
+            int transSlNo, string? heatNo, int userNo, int subscID, string? materialSource = null) =>
             CallPlanFieldsSP("SP_StoreIssueDtlPlanFields",
                 PfInt("@TransSlNo", transSlNo),
                 PfStr("@HeatNo", heatNo, 50),
                 PfInt("@UserNo", userNo),
-                PfInt("@SubscID", subscID));
+                PfInt("@SubscID", subscID),
+                PfStr("@MaterialSource", materialSource, 1));
     }
 }

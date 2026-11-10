@@ -146,8 +146,19 @@ namespace EMSAPI.Controllers
             var jobWork = new List<NeedLine>();
             foreach (var x in await LineFacts(plan, data))
             {
-                var qty = SumBetween(x.Planned, from, to);
-                if (qty <= 0) continue;
+                var planQty = SumBetween(x.Planned, from, to);
+                if (planQty <= 0) continue;
+                // Only what is still to forge needs bar: forging already done
+                // (in the period, or ahead of plan before it) is taken off.
+                var (forgedCredit, _) = ForgedCredit(x, from, to);
+                var qty = Math.Max(0, planQty - forgedCredit);
+                // A released line draws on its own job card: the bar already
+                // issued to it has left the store, so ask only for what is
+                // still to be issued to that card.
+                var jc = data.JobCardOf(plan.MTransNo, x.Seq, x.LineNo);
+                var reqKg = x.CustomerMaterial ? 0 : R2(qty * x.CutWt);
+                if (jc != null) reqKg = jc.Status == "Completed" ? 0 : R2(Math.Min(reqKg, Math.Max(0, jc.RMBalance)));
+                if (qty <= 0 || (!x.CustomerMaterial && x.Bar.RMPartNo > 0 && reqKg <= 0)) continue;
                 var first = x.Planned.Keys.Where(d => string.CompareOrdinal(d, from) >= 0 && string.CompareOrdinal(d, to) <= 0)
                                           .OrderBy(d => d, StringComparer.Ordinal).First();
                 var l = new NeedLine
@@ -156,8 +167,8 @@ namespace EMSAPI.Controllers
                     OANo = x.Source == "OA" ? x.OANo : "Stock", Ref = x.Source == "OA" ? x.OANo : "Job " + x.Seq,
                     Customer = x.Customer, PartName = x.PartName, Grade = x.Bar.RMGrade, Dia = x.Bar.Dia, RMText = x.BarText,
                     BarKey = x.BarKey, RMPartNo = x.Bar.RMPartNo, RMGradeNo = x.Bar.RMGradeNo, DeliveryDate = x.DeliveryDate,
-                    NeededBy = first, PendingQty = qty, PlanQty = qty, CutWt = x.CutWt, Rate = x.Rate,
-                    ReqKg = x.CustomerMaterial ? 0 : R2(qty * x.CutWt), JobWork = x.CustomerMaterial,
+                    NeededBy = first, PendingQty = qty, PlanQty = planQty, CutWt = x.CutWt, Rate = x.Rate,
+                    ReqKg = reqKg, JobWork = x.CustomerMaterial,
                     Released = x.JobCardNo != "",
                 };
                 if (l.JobWork) { l.Status = "Customer Material"; jobWork.Add(l); }

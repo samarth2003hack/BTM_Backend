@@ -19,8 +19,10 @@ namespace EMSAPI.Models
         public DateTime? DCDate { get; set; }
         public string? ReceivedBy { get; set; }
         public string? Remarks { get; set; }
-        /// <summary>Received | Verified.</summary>
+        /// <summary>Received | Verified (inward); Returned | Verified (return).</summary>
         public string? DocStatus { get; set; }
+        /// <summary>I = inward from the customer (default), R = return to the customer (SQL 67).</summary>
+        public string? DocType { get; set; }
         public int UserNo { get; set; }
         public int SubscID { get; set; }
         public string Status { get; set; } = "Insert";
@@ -68,6 +70,8 @@ namespace EMSAPI.Models
         public string? SystemIP { get; set; }
         public int UserNo { get; set; }
         public string? DeleteReason { get; set; }
+        /// <summary>I | R - used on Insert only (SQL 67).</summary>
+        public string DocType { get; set; } = "I";
         public int SubscID { get; set; }
     }
 }

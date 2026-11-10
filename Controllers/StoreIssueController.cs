@@ -1,6 +1,7 @@
 using EMSAPI.Models;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Data.SqlClient;
 
 namespace EMSAPI.Controllers
 {
@@ -47,6 +48,58 @@ namespace EMSAPI.Controllers
                 .Where(s => s.PartNo == partNo && s.Grade == g && s.SubscID == subscID &&
                             !(s.TxnType == "ISSUE" && s.RefTransNo == excludeIssueMTransNo))
                 .SumAsync(s => (decimal?)(s.InQty - s.OutQty)) ?? 0m;
+        }
+
+        /// <summary>
+        /// True when the OA line is marked as customer-supplied material
+        /// (OADtl.CustomerMaterial = 'Y', SQL 58): its bar is the customer's,
+        /// drawn from VW_CustomerMaterialStock, never from our stock.
+        /// </summary>
+        protected async Task<bool> IsCustomerMaterial(int? oaYearN, int? oaNoN, int? oaIdN, int subscID)
+        {
+            int oaYear = oaYearN ?? 0, oaNo = oaNoN ?? 0, oaId = oaIdN ?? 0;
+            if (oaYear <= 0 || oaNo <= 0 || oaId <= 0) return false;
+            var rows = await db.PmQueryRowsAsync(@"
+                SELECT TOP (1) ISNULL(d.CustomerMaterial, 'N') AS cm
+                  FROM dbo.OAMst m
+                  JOIN dbo.OADtl d ON d.MTransNo = m.MTransNo AND d.DeleteStatus = 'N'
+                 WHERE m.SubscID = @SubscID AND m.DocYear = @OAYear AND m.DocNo = @OANo
+                   AND m.DeleteStatus = 'N' AND m.DocAmdStatus = 'N' AND CAST(d.SlNo AS INT) = @OAID
+                 ORDER BY m.MTransNo DESC",
+                new SqlParameter("@SubscID", subscID), new SqlParameter("@OAYear", oaYear),
+                new SqlParameter("@OANo", oaNo), new SqlParameter("@OAID", oaId));
+            return rows.Count > 0 && Convert.ToString(rows[0]["cm"]) == "Y";
+        }
+
+        /// <summary>
+        /// The customer's balance of one bar (part + grade) on one OA. The issue
+        /// being edited passes its own id, so its own customer lines count as
+        /// still in hand (same rule as StockOf).
+        /// </summary>
+        protected async Task<decimal> CustomerStockOf(int? oaYearN, int? oaNoN, int partNo, string? grade, int subscID, int excludeIssueMTransNo = 0)
+        {
+            int oaYear = oaYearN ?? 0, oaNo = oaNoN ?? 0;
+            var rows = await db.PmQueryRowsAsync(@"
+                SELECT ISNULL((SELECT SUM(v.BalanceQty) FROM dbo.VW_CustomerMaterialStock v
+                                WHERE v.SubscID = @SubscID AND v.OAYear = @OAYear AND v.OANo = @OANo
+                                  AND v.PartNo = @PartNo AND v.Grade = @Grade), 0)
+                     + ISNULL((SELECT SUM(i.Qty) FROM dbo.StoreIssueDtl i
+                                WHERE i.MTransNo = @Exclude AND @Exclude > 0 AND i.DeleteStatus = 'N'
+                                  AND i.MaterialSource = 'C' AND i.OAYear = @OAYear AND i.OANo = @OANo
+                                  AND i.PartNo = @PartNo AND LTRIM(RTRIM(ISNULL(i.Grade, ''))) = @Grade), 0) AS q",
+                new SqlParameter("@SubscID", subscID), new SqlParameter("@OAYear", oaYear), new SqlParameter("@OANo", oaNo),
+                new SqlParameter("@PartNo", partNo), new SqlParameter("@Grade", NormGrade(grade)),
+                new SqlParameter("@Exclude", excludeIssueMTransNo));
+            return rows.Count > 0 ? Convert.ToDecimal(rows[0]["q"] ?? 0m) : 0m;
+        }
+
+        /// <summary>'C' or 'O' as saved on an issue line (SQL 67).</summary>
+        protected async Task<string> SourceOfLine(int transSlNo)
+        {
+            var rows = await db.PmQueryRowsAsync(
+                "SELECT MaterialSource AS s FROM dbo.StoreIssueDtl WHERE TransSlNo = @Id",
+                new SqlParameter("@Id", transSlNo));
+            return rows.Count > 0 ? Convert.ToString(rows[0]["s"]) ?? "O" : "O";
         }
 
         protected static string Label(string? code, string? name) =>
@@ -315,14 +368,21 @@ namespace EMSAPI.Controllers
         /// <summary>Stock in hand of a part in a grade. MTransNo = the issue
         /// being edited, whose own quantity counts as still in hand.</summary>
         [HttpGet("GetStock")]
-        public async Task<IActionResult> GetStock(int PartNo, string? Grade, int MTransNo = 0, int SubscID = 0)
+        public async Task<IActionResult> GetStock(int PartNo, string? Grade, int MTransNo = 0, int SubscID = 0,
+            int OAYear = 0, int OANo = 0, int OAID = 0)
         {
             if (PartNo <= 0) return BadRequestResult("Invalid Part.");
             if (SubscID <= 0) return BadRequestResult("Invalid Subscription.");
             try
             {
+                // A line of a customer-material OA line draws on the customer's bar.
+                if (await IsCustomerMaterial(OAYear, OANo, OAID, SubscID))
+                {
+                    var cust = await CustomerStockOf(OAYear, OANo, PartNo, Grade, SubscID, MTransNo);
+                    return OkResult(new { PartNo, Grade = NormGrade(Grade), StockQty = cust, Source = "Customer" }, "Data found.");
+                }
                 var stock = await StockOf(PartNo, Grade, SubscID, MTransNo);
-                return OkResult(new { PartNo, Grade = NormGrade(Grade), StockQty = stock }, "Data found.");
+                return OkResult(new { PartNo, Grade = NormGrade(Grade), StockQty = stock, Source = "Own" }, "Data found.");
             }
             catch (Exception ex) { return ErrorResult(ex); }
         }
@@ -501,10 +561,26 @@ namespace EMSAPI.Controllers
                         return ConflictResult($"{Qty(ret)} {src.Unit} of {label} has already been returned against this line; Issue Qty cannot go below that.");
                 }
 
-                var stock = await StockOf(src.PartNo, src.Grade, h.SubscID) + ownOld;
-                if (dto.Qty > stock)
-                    return ConflictResult($"Only {Qty(stock)} {src.Unit} of {label}" +
-                        (src.Grade.Length > 0 ? $" (grade {src.Grade})" : "") + " is in stock.");
+                // Whose bar: a saved line keeps its source; a new line takes the
+                // OA line's customer-material flag.
+                var source = cur != null
+                    ? await SourceOfLine(cur.TransSlNo)
+                    : (await IsCustomerMaterial(src.OAYear, src.OANo, src.OAID, h.SubscID) ? "C" : "O");
+                if (source == "C")
+                {
+                    var custStock = await CustomerStockOf(src.OAYear, src.OANo, src.PartNo, src.Grade, h.SubscID) + ownOld;
+                    if (dto.Qty > custStock)
+                        return ConflictResult($"Only {Qty(custStock)} {src.Unit} of {label}" +
+                            (src.Grade.Length > 0 ? $" (grade {src.Grade})" : "") +
+                            $" has been received from the customer for OA {src.OAYear}-{src.OANo} and not yet issued.");
+                }
+                else
+                {
+                    var stock = await StockOf(src.PartNo, src.Grade, h.SubscID) + ownOld;
+                    if (dto.Qty > stock)
+                        return ConflictResult($"Only {Qty(stock)} {src.Unit} of {label}" +
+                            (src.Grade.Length > 0 ? $" (grade {src.Grade})" : "") + " is in stock.");
+                }
 
                 if (src.OAYear > 0 || src.OANo > 0 || src.OAID > 0)
                 {
@@ -539,7 +615,7 @@ namespace EMSAPI.Controllers
                 // Heat number off the bar tag (SQL 58): blank, or an approved
                 // heat of this part — see api/HeatNo/Dtl/GetByPart.
                 var plan = await db.CallStoreIssueDtlPlanFieldsSP(id,
-                    Trunc(dto.HeatNo, 50).ToUpperInvariant(), dto.UserNo, h.SubscID);
+                    Trunc(dto.HeatNo, 50).ToUpperInvariant(), dto.UserNo, h.SubscID, source);
                 if (plan.ID == 0) return ConflictResult(label + ": " + plan.Message);
 
                 await tx.CommitAsync();

@@ -49,16 +49,20 @@ namespace EMSAPI.Controllers
                         var carryIn = string.CompareOrdinal(w.From, Today) > 0 ? 0 : Math.Max(0, SumBefore(x.Planned, w.From) - SumBefore(x.Forged, w.From));
                         if (planned == 0 && carryIn == 0) continue;
                         var forged = SumBetween(x.Forged, w.From, w.To);
+                        // Forged ahead of plan (before the week) comes off the sheet.
+                        var (_, early) = ForgedCredit(x, w.From, w.To);
+                        var toForge = Math.Max(0, planned + carryIn - early);
                         var row = Pick(x);
                         row["weekNo"] = w.WeekNo;
                         row["weekStatus"] = weekStatus;
                         row["days"] = w.Dates.Where(d => x.Planned.ContainsKey(d)).ToDictionary(d => d, d => x.Planned[d]);
                         row["plannedQty"] = planned;
                         row["carryOverQty"] = carryIn;
-                        row["toForgeQty"] = planned + carryIn;
+                        row["forgedEarlyQty"] = early;
+                        row["toForgeQty"] = toForge;
                         row["forgedQty"] = forged;
-                        row["balanceQty"] = Math.Max(0, planned + carryIn - forged);
-                        row["rmKg"] = R2((planned + carryIn) * x.CutWt);
+                        row["balanceQty"] = Math.Max(0, toForge - forged);
+                        row["rmKg"] = R2(toForge * x.CutWt);
                         rows.Add(row);
                     }
                     return OkResult(new { plan = periods, period = "Week", from = w.From, to = w.To, label = w.Label, weekStatus,
@@ -74,16 +78,20 @@ namespace EMSAPI.Controllers
                     var carry = string.CompareOrdinal(date, Today) > 0 ? 0 : Math.Max(0, SumBefore(x.Planned, date) - SumBefore(x.Forged, date));
                     if (planned == 0 && carry == 0) continue;
                     var forged = x.Forged.TryGetValue(date, out var fq) ? fq : 0;
+                    // Forged ahead of plan (before the day) comes off the sheet.
+                    var (_, early) = ForgedCredit(x, date, date);
+                    var toForge = Math.Max(0, planned + carry - early);
                     var row = Pick(x);
                     row["date"] = date;
                     row["weekNo"] = weekNo;
                     row["weekStatus"] = weekNo > 0 ? (plan.Weeks.TryGetValue(weekNo, out var st) ? st : "Open") : "";
                     row["plannedQty"] = planned;
                     row["carryOverQty"] = carry;
-                    row["toForgeQty"] = planned + carry;
+                    row["forgedEarlyQty"] = early;
+                    row["toForgeQty"] = toForge;
                     row["forgedQty"] = forged;
-                    row["balanceQty"] = Math.Max(0, planned + carry - forged);
-                    row["rmKg"] = R2((planned + carry) * x.CutWt);
+                    row["balanceQty"] = Math.Max(0, toForge - forged);
+                    row["rmKg"] = R2(toForge * x.CutWt);
                     rows.Add(row);
                 }
                 return OkResult(new { plan = periods, period = "Day", from = date, to = date, label = date,

@@ -43,6 +43,7 @@ namespace EMSAPI.Controllers
         // One row per live inward, with its line count and total kg.
         private const string InwardSelect = @"
             SELECT  m.MTransNo                              AS mTransNo,
+                    m.DocType                               AS docType,
                     m.InwardNo                              AS inwardNo,
                     m.DocYear                               AS docYear,
                     m.DocNo                                 AS docNo,
@@ -144,17 +145,20 @@ namespace EMSAPI.Controllers
 
         /// <summary>Preview only — SP_CustMatInwardMst allocates the number under a lock.</summary>
         [HttpGet("GetMaxNo")]
-        public async Task<IActionResult> GetMaxNo([FromQuery] DateTime? docDate, [FromQuery] int subscID)
+        public async Task<IActionResult> GetMaxNo([FromQuery] DateTime? docDate, [FromQuery] int subscID, [FromQuery] string? docType = "I")
         {
             if (subscID <= 0) return BadRequestResult("Invalid Subscription.");
+            var type = string.Equals(docType, "R", StringComparison.OrdinalIgnoreCase) ? "R" : "I";
             try
             {
                 var rows = await db.PmQueryRowsAsync(@"
                     DECLARE @Year INT = dbo.FN_FYCode(@Date);
-                    SELECT CONCAT('CMI-', @Year, '-', RIGHT('00000' + CAST(ISNULL(MAX(DocNo), 0) + 1 AS VARCHAR(10)), 5)) AS no
-                      FROM dbo.CustMatInwardMst WHERE SubscID = @SubscID AND DocYear = @Year",
+                    SELECT CONCAT(CASE WHEN @Type = 'R' THEN 'CMR-' ELSE 'CMI-' END, @Year, '-',
+                                  RIGHT('00000' + CAST(ISNULL(MAX(DocNo), 0) + 1 AS VARCHAR(10)), 5)) AS no
+                      FROM dbo.CustMatInwardMst WHERE SubscID = @SubscID AND DocYear = @Year AND DocType = @Type",
                     new SqlParameter("@Date", SqlDbType.Date) { Value = (docDate ?? DateTime.Today).Date },
-                    Int("@SubscID", subscID));
+                    Int("@SubscID", subscID),
+                    new SqlParameter("@Type", SqlDbType.Char, 1) { Value = type });
                 return OkResult(rows.Count > 0 ? Convert.ToString(rows[0]["no"]) : "");
             }
             catch (Exception ex) { return ErrorResult(ex); }
@@ -277,9 +281,10 @@ namespace EMSAPI.Controllers
             if (!isUpdate && !string.Equals(r.Status, "Insert", StringComparison.OrdinalIgnoreCase))
                 return BadRequestResult("Status must be Insert or Update.");
             if (isUpdate && r.MTransNo <= 0) return BadRequestResult("Invalid inward.");
-            if (r.InwardDate == null) return BadRequestResult("Inward Date is required.");
+            var docType = string.Equals(r.DocType, "R", StringComparison.OrdinalIgnoreCase) ? "R" : "I";
+            if (r.InwardDate == null) return BadRequestResult(docType == "R" ? "Return Date is required." : "Inward Date is required.");
             if (r.OAYear <= 0 || r.OANo <= 0) return BadRequestResult("Select the Order Acceptance.");
-            if (string.IsNullOrWhiteSpace(r.DCNo)) return BadRequestResult("Customer DC No is required.");
+            if (string.IsNullOrWhiteSpace(r.DCNo)) return BadRequestResult(docType == "R" ? "Our DC No is required." : "Customer DC No is required.");
             if (r.DCDate == null) return BadRequestResult("DC Date is required.");
 
             try
@@ -309,7 +314,8 @@ namespace EMSAPI.Controllers
                     DCDate = r.DCDate.Value.Date,
                     ReceivedBy = Cut(r.ReceivedBy, 100),
                     Remarks = Cut(r.Remarks, 250),
-                    DocStatus = string.IsNullOrWhiteSpace(r.DocStatus) ? "Received" : r.DocStatus.Trim(),
+                    DocStatus = string.IsNullOrWhiteSpace(r.DocStatus) ? (docType == "R" ? "Returned" : "Received") : r.DocStatus.Trim(),
+                    DocType = docType,
                     SystemIP = ClientIp,
                     UserNo = r.UserNo,
                     SubscID = r.SubscID,

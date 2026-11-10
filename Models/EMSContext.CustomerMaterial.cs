@@ -41,6 +41,7 @@ namespace EMSAPI.Models
                 new SqlParameter("@UserNo",       SqlDbType.Int)          { Value = dto.UserNo },
                 new SqlParameter("@DeleteReason", SqlDbType.VarChar, 250) { Value = CmValue(dto.DeleteReason) },
                 new SqlParameter("@SubscID",      SqlDbType.Int)          { Value = dto.SubscID },
+                new SqlParameter("@DocType",      SqlDbType.Char,      1) { Value = string.IsNullOrWhiteSpace(dto.DocType) ? "I" : dto.DocType },
             };
 
             await Database.ExecuteSqlRawAsync("""
@@ -49,7 +50,7 @@ namespace EMSAPI.Models
                     @InwardDate = @InwardDate, @CustomerNo = @CustomerNo, @OAYear = @OAYear, @OANo = @OANo,
                     @DCNo = @DCNo, @DCDate = @DCDate, @ReceivedBy = @ReceivedBy, @Remarks = @Remarks,
                     @DocStatus = @DocStatus, @SystemIP = @SystemIP, @UserNo = @UserNo,
-                    @DeleteReason = @DeleteReason, @SubscID = @SubscID
+                    @DeleteReason = @DeleteReason, @SubscID = @SubscID, @DocType = @DocType
                 """, p);
 
             return CmResult(id, msg);

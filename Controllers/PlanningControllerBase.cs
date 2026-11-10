@@ -491,6 +491,34 @@ namespace EMSAPI.Controllers
         protected static double SumBetween(Dictionary<string, double> map, string from, string to) =>
             map.Where(kv => string.CompareOrdinal(kv.Key, from) >= 0 && string.CompareOrdinal(kv.Key, to) <= 0).Sum(kv => kv.Value);
 
+        /// <summary>
+        /// Forging credited to a plan line for a period: what was forged inside
+        /// the period, plus forging done AHEAD of the plan before the period
+        /// began (more forged than planned up to then), up to the period's
+        /// planned qty. Without the early part, a line forged before its
+        /// planned dates showed as "Not Started" and still needed bar.
+        /// </summary>
+        protected static (double Forged, double Early) ForgedCredit(LineFact x, string from, string to)
+        {
+            var plannedIn = SumBetween(x.Planned, from, to);
+            var forgedIn = SumBetween(x.Forged, from, to);
+            var ahead = Math.Max(0, SumBefore(x.Forged, from) - SumBefore(x.Planned, from));
+            var early = Math.Min(plannedIn, ahead);
+            return (forgedIn + early, early);
+        }
+
+        /// <summary>
+        /// Bar (kg) still needed by the open job cards of an OA line, and the
+        /// pieces those cards still have to forge. A card's bar is issued to it
+        /// from the store (RM balance = what is still to be issued); the pieces
+        /// on it are covered by that bar, so they must not be asked for again.
+        /// </summary>
+        protected static (double CardKg, double CardQty) OpenCardsOf(PlanningData data, int oaYear, int oaNo, int oaId)
+        {
+            var open = data.JobCards.Where(j => j.OAYear == oaYear && j.OANo == oaNo && j.OAID == oaId && j.Status != "Completed").ToList();
+            return (open.Sum(j => Math.Max(0, j.RMBalance)), open.Sum(j => Math.Max(0, j.Qty - j.Forged)));
+        }
+
         protected async Task<List<LineFact>> LineFacts(PlanHead plan, PlanningData data)
         {
             var days = await StoredDays(plan.MTransNo);
@@ -725,12 +753,17 @@ namespace EMSAPI.Controllers
                 var pending = PendingOf(data, o);
                 if (pending <= 0) continue;
                 var bar = data.BarOf(o.PartNo, o.Grade);
+                // Pieces on open job cards draw on the bar issued (or still to
+                // be issued) to those cards; only the rest needs new bar.
+                var (cardKg, cardQty) = OpenCardsOf(data, o.OAYear, o.OANo, o.OAID);
+                var reqKg = o.CustomerMaterial ? 0 : R2(Math.Max(0, pending - cardQty) * bar.CutWt + cardKg);
+                if (!o.CustomerMaterial && bar.RMPartNo > 0 && reqKg <= 0) continue;
                 var l = new NeedLine
                 {
                     SeqNo = seq, OAKey = o.Key, Ref = o.Label, OANo = o.Label, SoDate = o.OADate, Customer = o.Customer,
                     PartName = data.PartName(o.PartNo), Grade = bar.RMGrade, Dia = bar.Dia, RMText = bar.Text, BarKey = bar.Key,
                     RMPartNo = bar.RMPartNo, RMGradeNo = bar.RMGradeNo, DeliveryDate = o.PlanDate, PendingQty = pending,
-                    CutWt = bar.CutWt, Rate = o.Rate, ReqKg = o.CustomerMaterial ? 0 : R2(pending * bar.CutWt),
+                    CutWt = bar.CutWt, Rate = o.Rate, ReqKg = reqKg,
                     JobWork = o.CustomerMaterial,
                     Released = data.JobCards.Any(j => j.OAYear == o.OAYear && j.OANo == o.OANo && j.OAID == o.OAID && j.Status != "Completed"),
                     NeededBy = planned.TryGetValue(o.Key, out var pd) ? pd.From : "",

@@ -38,9 +38,13 @@ namespace EMSAPI.Controllers
                 {
                     if (hammer != "" && x.Hammer != hammer) continue;
                     var plannedDates = x.Planned.Keys.Where(d => In(d, from, to)).OrderBy(d => d, StringComparer.Ordinal).ToList();
-                    var forgedDates = x.Forged.Keys.Where(d => In(d, from, to)).OrderBy(d => d, StringComparer.Ordinal).ToList();
                     var planned = SumBetween(x.Planned, from, to);
-                    var forged = SumBetween(x.Forged, from, to);
+                    // Forging done ahead of plan (before the period) counts too.
+                    var (forged, early) = ForgedCredit(x, from, to);
+                    var forgedDates = x.Forged.Keys
+                        .Where(d => In(d, from, to) || (early > 0 && string.CompareOrdinal(d, from) < 0))
+                        .OrderBy(d => d, StringComparer.Ordinal).ToList();
+                    var rejected = SumBetween(x.Rejected, from, to) + (early > 0 ? SumBefore(x.Rejected, from) : 0);
                     var carryIn = (period == "Week" || period == "Day") && string.CompareOrdinal(from, Today) <= 0
                         ? Math.Max(0, SumBefore(x.Planned, from) - SumBefore(x.Forged, from)) : 0;
                     if (planned == 0 && forged == 0 && carryIn == 0) continue;
@@ -53,7 +57,7 @@ namespace EMSAPI.Controllers
                         plannedQty = planned, rate = x.Rate, jobCardNo = x.JobCardNo, forgedQty = forged,
                         actualStart = forgedDates.FirstOrDefault() ?? "", actualEnd = forgedDates.LastOrDefault() ?? "",
                         shortClosed = x.ShortClosed, remarks = x.Remarks,
-                        rejectedQty = SumBetween(x.Rejected, from, to), forgeBy = x.ForgeBy, deliveryDate = x.DeliveryDate,
+                        forgedEarlyQty = early, rejectedQty = Math.Min(rejected, forged), forgeBy = x.ForgeBy, deliveryDate = x.DeliveryDate,
                     });
                 }
                 return OkResult(rows, rows.Count > 0 ? "Data found." : "No records found.");
