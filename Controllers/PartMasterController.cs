@@ -37,15 +37,29 @@ namespace EMSAPI.Controllers
             if (dto.SubscID <= 0 || dto.CreatedBy <= 0)
                 return BadRequestResult("Invalid input parameters.");
 
+            if (dto.ExcessPct is < 0 or > 100)
+                return BadRequestResult("Extra allowed % must be between 0 and 100.");
+
             try
             {
                 dto.SystemIP = ClientIp;
+
+                await using var tx = await db.Database.BeginTransactionAsync();
 
                 var result = await db.CallPartMasterSP(dto);
 
                 if (result.ID == 0)
                     return ConflictResult(result.Message);
 
+                // Extra allowed % on GRN (SQL 70), in the same transaction.
+                if (!string.Equals(dto.Status, "Delete", StringComparison.OrdinalIgnoreCase))
+                {
+                    var excess = await db.CallPartMasterExcessSP(result.ID, dto.ExcessPct, dto.CreatedBy, dto.SubscID);
+                    if (excess.ID == 0)
+                        return ConflictResult(excess.Message);
+                }
+
+                await tx.CommitAsync();
                 return OkResult(new { ID = result.ID }, result.Message);
             }
             catch (Exception ex)

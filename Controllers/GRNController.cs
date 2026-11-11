@@ -142,10 +142,21 @@ namespace EMSAPI.Controllers
                         mine[o.SlNo ?? 0m] = (o.BillQty, o.RecQty, o.TransSlNo);
                 }
 
+                // Extra allowed % of each part (SQL 70): the line may receive up
+                // to PO qty x (1 + % / 100). SP_GRNDtl enforces the same limit.
+                var partNos = lines.Select(x => x.PartNo).Distinct().ToList();
+                var excessByPart = await db.PartMaster
+                    .AsNoTracking()
+                    .Where(p => partNos.Contains(p.MTransNo))
+                    .Select(p => new { p.MTransNo, p.ExcessPct })
+                    .ToDictionaryAsync(p => p.MTransNo, p => p.ExcessPct ?? 0m);
+
                 var data = lines.Select(x =>
                 {
                     var key = x.LinkNo ?? 0m;
                     mine.TryGetValue(key, out var booked);
+                    var excessPct = excessByPart.TryGetValue(x.PartNo, out var ep) ? ep : 0m;
+                    var balance = x.BalanceQty + booked.Bill;
 
                     return new
                     {
@@ -160,6 +171,10 @@ namespace EMSAPI.Controllers
                         // Balance as this GRN sees it: what is outstanding,
                         // plus whatever this GRN itself has already taken.
                         BalanceQty   = x.BalanceQty + booked.Bill,
+                        // Most this GRN may bill on the line: the balance plus
+                        // the part's extra allowed % of the PO qty.
+                        ExcessPct    = excessPct,
+                        AllowedQty   = balance + Math.Round(x.POQty * excessPct / 100m, 4),
                         GRNTransSlNo = booked.TransSlNo == 0 ? (int?)null : booked.TransSlNo,
                         GRNBillQty   = booked.Bill,
                         GRNRecQty    = booked.Rec

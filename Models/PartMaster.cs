@@ -62,6 +62,10 @@ namespace EMSAPI.Models
         public decimal? PartWeight { get; set; }
         public string? AtchFileName { get; set; }
 
+        // Extra allowed % on GRN (SQL 70): a supplier may deliver up to this %
+        // above the PO quantity. 0 = no extra.
+        public decimal? ExcessPct { get; set; }
+
         public string? SystemIP { get; set; }
         public int? CreatedBy { get; set; }
         public DateTime? CreatedOn { get; set; }
@@ -131,6 +135,10 @@ namespace EMSAPI.Models
         public decimal? PartHeight { get; set; }
         public decimal? PartWeight { get; set; }
         public string? AtchFileName { get; set; }
+
+        // Extra allowed % on GRN (SQL 70). Saved by SP_PartMasterExcess after
+        // SP_PartMaster; null keeps the stored value.
+        public decimal? ExcessPct { get; set; }
 
         public string? SystemIP { get; set; }
         public string LockStatus { get; set; } = "N";
