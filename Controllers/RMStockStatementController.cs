@@ -35,9 +35,9 @@ namespace EMSAPI.Controllers
                 var ledger = await Query(@"
                     SELECT s.PartNo AS partNo, LTRIM(RTRIM(ISNULL(s.Grade, ''))) AS grade,
                            ISNULL(p.PartCode, '') AS partCode, ISNULL(p.PartName, '') AS partName,
-                           SUM(CASE WHEN s.DocDate < @From THEN ISNULL(s.InQty, 0) - ISNULL(s.OutQty, 0) ELSE 0 END) AS opening,
-                           SUM(CASE WHEN s.DocDate BETWEEN @From AND @To AND s.TxnType IN ('GRN', 'RETURN') THEN ISNULL(s.InQty, 0) ELSE 0 END) AS receipt,
-                           SUM(CASE WHEN s.DocDate BETWEEN @From AND @To THEN ISNULL(s.OutQty, 0) ELSE 0 END) AS issued,
+                           SUM(CASE WHEN s.DocDate < @From OR s.TxnType = 'OPENING' THEN ISNULL(s.InQty, 0) - ISNULL(s.OutQty, 0) ELSE 0 END) AS opening,
+                           SUM(CASE WHEN s.DocDate BETWEEN @From AND @To AND s.TxnType IN ('GRN', 'RETURN', 'PRODUCTION') THEN ISNULL(s.InQty, 0) ELSE 0 END) AS receipt,
+                           SUM(CASE WHEN s.DocDate BETWEEN @From AND @To AND s.TxnType <> 'OPENING' THEN ISNULL(s.OutQty, 0) ELSE 0 END) AS issued,
                            SUM(CASE WHEN s.DocDate BETWEEN @From AND @To AND s.TxnType = 'RETURN' AND rt.ReturnType = 'End Piece'
                                     THEN ISNULL(s.InQty, 0) ELSE 0 END) AS endPiece,
                            STRING_AGG(CASE WHEN s.DocDate BETWEEN @From AND @To AND s.TxnType = 'GRN'
@@ -50,10 +50,17 @@ namespace EMSAPI.Controllers
                      GROUP BY s.PartNo, LTRIM(RTRIM(ISNULL(s.Grade, ''))), p.PartCode, p.PartName",
                     Int("@SubscID", SubscID), Str("@From", from, 10), Str("@To", to, 10));
                 var rates = (await Query(@"
-                    SELECT d.PartNo AS partNo, LTRIM(RTRIM(ISNULL(d.Grade, ''))) AS grade,
-                           CASE WHEN SUM(ISNULL(d.AccQty, 0)) > 0 THEN SUM(ISNULL(d.Rate, 0) * ISNULL(d.AccQty, 0)) / SUM(ISNULL(d.AccQty, 0)) ELSE MAX(ISNULL(d.Rate, 0)) END AS rate
-                      FROM dbo.GRNDtl d WHERE d.SubscID = @SubscID AND d.DeleteStatus = 'N'
-                     GROUP BY d.PartNo, LTRIM(RTRIM(ISNULL(d.Grade, '')))", Int("@SubscID", SubscID)))
+                    SELECT d.PartNo AS partNo, d.Grade AS grade,
+                           CASE WHEN SUM(d.Q) > 0 THEN SUM(d.Rate * d.Q) / SUM(d.Q) ELSE MAX(d.Rate) END AS rate
+                      FROM (SELECT PartNo, LTRIM(RTRIM(ISNULL(Grade, ''))) AS Grade, ISNULL(AccQty, 0) AS Q, ISNULL(Rate, 0) AS Rate
+                              FROM dbo.GRNDtl WHERE SubscID = @SubscID AND DeleteStatus = 'N'
+                            UNION ALL   -- SQL 72: approved own opening stock is valued at its rate too
+                            SELECT od.PartNo, LTRIM(RTRIM(od.Grade)), od.Qty, od.Rate
+                              FROM dbo.OpeningStockDtl od
+                              JOIN dbo.OpeningStockMst om ON om.MTransNo = od.MTransNo AND om.DeleteStatus = 'N'
+                                                         AND om.LockStatus = 'Y' AND om.StockType = 'OWN'
+                             WHERE om.SubscID = @SubscID AND od.DeleteStatus = 'N') d
+                     GROUP BY d.PartNo, d.Grade", Int("@SubscID", SubscID)))
                     .ToDictionary(r => I(r, "partNo") + "|" + S(r, "grade"), r => Dbl(r, "rate"));
                 var jobCards = (await Query(@"
                     SELECT j.RMPartNo AS partNo, LTRIM(RTRIM(j.RMGrade)) AS grade, STRING_AGG(j.JobCardNo, ', ') AS jcs

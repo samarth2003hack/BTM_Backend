@@ -598,6 +598,8 @@ namespace EMSAPI.Controllers
         /// <summary>
         /// Approved heat numbers of one part (and grade, when given) with what
         /// is left of each — the Store Issue line's Heat No picker (SQL 58).
+        /// Heats counted on an approved opening stock (SQL 72) are listed too,
+        /// first, with "OS series/no" as their document.
         /// GetByPart?partNo=&amp;grade=&amp;subscID=
         /// Row: { heatNo, tcNo, tcDate, grade, unit, qty, issuedQty, balanceQty,
         ///        grnNo, grnTransNo, heatDocNo, transSlNo }
@@ -660,7 +662,28 @@ namespace EMSAPI.Controllers
                                AND LTRIM(RTRIM(ISNULL(d.HeatNo, ''))) <> ''
                                AND (@Grade = '' OR LTRIM(RTRIM(ISNULL(d.Grade, ''))) IN ('', @Grade))
                              GROUP BY UPPER(LTRIM(RTRIM(d.HeatNo))), ISNULL(d.TCNo, ''), LTRIM(RTRIM(ISNULL(d.Grade, ''))), ISNULL(NULLIF(d.Unit, ''), 'KG')
-                             ORDER BY MIN(d.TransSlNo)
+                            UNION ALL
+                            -- SQL 72: the customer's bar counted on an approved opening stock of this OA
+                            SELECT UPPER(LTRIM(RTRIM(d.HeatNo))), ISNULL(d.TCNo, ''), CONVERT(char(10), MIN(o.AsOnDate), 23),
+                                   LTRIM(RTRIM(d.Grade)), ISNULL(NULLIF(d.Unit, ''), 'KG'),
+                                   SUM(d.Qty), ISNULL(MAX(iss.q), 0), SUM(d.Qty) - ISNULL(MAX(iss.q), 0),
+                                   CONCAT('OS ', RTRIM(MAX(o.DocSeries)), '/', MAX(o.DocNo)), 0,
+                                   CONCAT('OS ', RTRIM(MAX(o.DocSeries)), '/', MAX(o.DocNo)), MIN(d.TransSlNo), 'Opening'
+                              FROM dbo.OpeningStockDtl d
+                              JOIN dbo.OpeningStockMst o ON o.MTransNo = d.MTransNo AND o.DeleteStatus = 'N'
+                                                       AND o.LockStatus = 'Y' AND o.StockType = 'CUSTOMER'
+                             OUTER APPLY (SELECT SUM(i.Qty) AS q
+                                            FROM dbo.StoreIssueDtl i
+                                            JOIN dbo.StoreIssueMst im ON im.MTransNo = i.MTransNo AND im.DeleteStatus = 'N'
+                                           WHERE i.DeleteStatus = 'N' AND i.MaterialSource = 'C' AND i.PartNo = d.PartNo
+                                             AND i.OAYear = o.OAYear AND i.OANo = o.OANo
+                                             AND UPPER(LTRIM(RTRIM(i.HeatNo))) = UPPER(LTRIM(RTRIM(d.HeatNo)))) iss
+                             WHERE o.SubscID = @SubscID AND d.DeleteStatus = 'N' AND d.PartNo = @PartNo
+                               AND o.OAYear = @OAYear AND o.OANo = @OANo
+                               AND LTRIM(RTRIM(ISNULL(d.HeatNo, ''))) <> ''
+                               AND (@Grade = '' OR LTRIM(RTRIM(d.Grade)) IN ('', @Grade))
+                             GROUP BY UPPER(LTRIM(RTRIM(d.HeatNo))), ISNULL(d.TCNo, ''), LTRIM(RTRIM(d.Grade)), ISNULL(NULLIF(d.Unit, ''), 'KG')
+                             ORDER BY transSlNo
                             """,
                             new SqlParameter("@PartNo",  SqlDbType.Int) { Value = partNo },
                             new SqlParameter("@SubscID", SqlDbType.Int) { Value = subscID },
@@ -672,6 +695,8 @@ namespace EMSAPI.Controllers
                 }
 
                 var data = await db.PmQueryRowsAsync("""
+                    SELECT heatNo, tcNo, tcDate, grade, unit, qty, issuedQty, balanceQty, grnNo, grnTransNo, heatDocNo, transSlNo
+                      FROM (
                     SELECT UPPER(LTRIM(RTRIM(d.HeatNo)))              AS heatNo,
                            ISNULL(d.TCNo, '')                         AS tcNo,
                            CONVERT(char(10), d.TCDate, 23)            AS tcDate,
@@ -683,7 +708,11 @@ namespace EMSAPI.Controllers
                            CONCAT(m.TargetDocYear, '-', m.TargetDocNo) AS grnNo,
                            m.TargetTransNo                            AS grnTransNo,
                            CONCAT(m.DocYear, '-', m.DocNo)            AS heatDocNo,
-                           d.TransSlNo                                AS transSlNo
+                           d.TransSlNo                                AS transSlNo,
+                           1                                          AS src,
+                           m.DocDate                                  AS sortDate,
+                           m.DocNo                                    AS sortNo,
+                           d.SlNo                                     AS sortSl
                       FROM dbo.HeatNoDtl d
                       JOIN dbo.HeatNoMst m ON m.MTransNo = d.MTransNo
                                           AND m.DeleteStatus = 'N' AND m.LockStatus = 'Y'
@@ -696,7 +725,25 @@ namespace EMSAPI.Controllers
                        AND LTRIM(RTRIM(ISNULL(d.HeatNo, ''))) <> ''
                        AND (@Grade = ''
                             OR LTRIM(RTRIM(ISNULL(NULLIF(LTRIM(RTRIM(d.Grade)), ''), ISNULL(m.Grade, '')))) IN ('', @Grade))
-                     ORDER BY m.DocDate, m.DocNo, d.SlNo
+                    UNION ALL
+                    -- SQL 72: heats on an approved own opening stock of the part (the oldest stock, so first)
+                    SELECT UPPER(LTRIM(RTRIM(d.HeatNo))), ISNULL(d.TCNo, ''), CONVERT(char(10), o.AsOnDate, 23),
+                           LTRIM(RTRIM(d.Grade)), ISNULL(d.Unit, ''), d.Qty, ISNULL(iss.q, 0), d.Qty - ISNULL(iss.q, 0),
+                           CONCAT('OS ', RTRIM(o.DocSeries), '/', o.DocNo), 0, CONCAT('OS ', RTRIM(o.DocSeries), '/', o.DocNo),
+                           d.TransSlNo, 0, CAST(o.AsOnDate AS DATETIME), o.DocNo, d.SlNo
+                      FROM dbo.OpeningStockDtl d
+                      JOIN dbo.OpeningStockMst o ON o.MTransNo = d.MTransNo AND o.DeleteStatus = 'N'
+                                               AND o.LockStatus = 'Y' AND o.StockType = 'OWN'
+                     OUTER APPLY (SELECT SUM(i.Qty) AS q
+                                    FROM dbo.StoreIssueDtl i
+                                    JOIN dbo.StoreIssueMst im ON im.MTransNo = i.MTransNo AND im.DeleteStatus = 'N'
+                                   WHERE i.DeleteStatus = 'N' AND i.SubscID = d.SubscID AND i.PartNo = d.PartNo
+                                     AND UPPER(LTRIM(RTRIM(i.HeatNo))) = UPPER(LTRIM(RTRIM(d.HeatNo)))) iss
+                     WHERE o.SubscID = @SubscID AND d.DeleteStatus = 'N' AND d.PartNo = @PartNo
+                       AND LTRIM(RTRIM(ISNULL(d.HeatNo, ''))) <> ''
+                       AND (@Grade = '' OR LTRIM(RTRIM(d.Grade)) IN ('', @Grade))
+                      ) h
+                     ORDER BY src, sortDate, sortNo, sortSl
                     """,
                     new SqlParameter("@PartNo",  SqlDbType.Int) { Value = partNo },
                     new SqlParameter("@SubscID", SqlDbType.Int) { Value = subscID },
