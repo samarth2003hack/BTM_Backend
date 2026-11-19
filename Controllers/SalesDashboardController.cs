@@ -62,6 +62,12 @@ namespace EMSAPI.Controllers
         private const int MaxCategorySlices = 4;
         private const int KeyCustomers = 12;
 
+        // Daily view and order lists (client's daily dashboard): a list carries at most
+        // ListLimit rows plus its full count; a chart its top ChartLimit plus one "Others".
+        private const int ListLimit = 50;
+        private const int ChartLimit = 10;
+        private const int RecentOrderDays = 7;
+
         // INR value of a document amount.
         private const string Rate = "ISNULL(NULLIF(m.CurrencyRate, 0), 1)";
 
@@ -555,6 +561,172 @@ namespace EMSAPI.Controllers
                         value = (decimal?)null, date = Str(r, "date")
                     });
 
+                // ---------------------------------------------------------
+                // 3.16 Daily view (client's daily dashboard): yesterday's and
+                // today's sales and orders booked, and this month so far against
+                // the same days of last month. "Yesterday" is the calendar day
+                // before asOfDate. Sales = invoices (STxnMst, same rule as 3.2);
+                // orders booked = approved OAs by OA date (same rule as order intake).
+                // ---------------------------------------------------------
+                var yesterday = asOf.AddDays(-1);
+                var monthStart = new DateTime(asOf.Year, asOf.Month, 1);
+                var prevFrom = monthStart.AddMonths(-1);
+                var prevTo = prevFrom.AddDays(asOf.Day - 1);
+                if (prevTo >= monthStart) prevTo = monthStart.AddDays(-1);
+                var recentFrom = asOf.AddDays(-(RecentOrderDays - 1));
+                SqlParameter[] PD() => new[]
+                {
+                    new SqlParameter("@SubscID", SqlDbType.Int) { Value = subscID },
+                    new SqlParameter("@AsOf", SqlDbType.Date) { Value = asOf },
+                    new SqlParameter("@Yesterday", SqlDbType.Date) { Value = yesterday },
+                    new SqlParameter("@MonthStart", SqlDbType.Date) { Value = monthStart },
+                    new SqlParameter("@PrevFrom", SqlDbType.Date) { Value = prevFrom },
+                    new SqlParameter("@PrevTo", SqlDbType.Date) { Value = prevTo },
+                    new SqlParameter("@RecentFrom", SqlDbType.Date) { Value = recentFrom }
+                };
+                var day = (await Rows(con, @"
+                    WITH inv AS (
+                        SELECT m.DocDate, ISNULL(m.NetValue, 0) * " + Rate + @" AS val
+                        FROM dbo.STxnMst m
+                        WHERE m.SubscID = @SubscID AND m.DeleteStatus = 'N'
+                          AND m.DocDate BETWEEN @PrevFrom AND @AsOf
+                    ),
+                    oa AS (
+                        SELECT m.DocDate, ISNULL(m.NetValue, 0) * " + Rate + @" AS val
+                        FROM dbo.OAMst m
+                        WHERE m.SubscID = @SubscID AND m.DeleteStatus = 'N' AND m.DocAmdStatus = 'N'
+                          AND m.LockStatus = 'Y'
+                          AND m.DocDate BETWEEN @PrevFrom AND @AsOf
+                    )
+                    SELECT
+                      (SELECT SUM(val) FROM inv WHERE DocDate = @AsOf)                          AS todayInvoiced,
+                      (SELECT COUNT(*) FROM inv WHERE DocDate = @AsOf)                          AS todayInvoices,
+                      (SELECT SUM(val) FROM oa  WHERE DocDate = @AsOf)                          AS todayOrderValue,
+                      (SELECT COUNT(*) FROM oa  WHERE DocDate = @AsOf)                          AS todayOrders,
+                      (SELECT SUM(val) FROM inv WHERE DocDate = @Yesterday)                     AS yInvoiced,
+                      (SELECT COUNT(*) FROM inv WHERE DocDate = @Yesterday)                     AS yInvoices,
+                      (SELECT SUM(val) FROM oa  WHERE DocDate = @Yesterday)                     AS yOrderValue,
+                      (SELECT COUNT(*) FROM oa  WHERE DocDate = @Yesterday)                     AS yOrders,
+                      (SELECT SUM(val) FROM inv WHERE DocDate BETWEEN @MonthStart AND @AsOf)    AS mInvoiced,
+                      (SELECT COUNT(*) FROM inv WHERE DocDate BETWEEN @MonthStart AND @AsOf)    AS mInvoices,
+                      (SELECT SUM(val) FROM oa  WHERE DocDate BETWEEN @MonthStart AND @AsOf)    AS mOrderValue,
+                      (SELECT COUNT(*) FROM oa  WHERE DocDate BETWEEN @MonthStart AND @AsOf)    AS mOrders,
+                      (SELECT SUM(val) FROM inv WHERE DocDate BETWEEN @PrevFrom AND @PrevTo)    AS pInvoiced,
+                      (SELECT SUM(val) FROM oa  WHERE DocDate BETWEEN @PrevFrom AND @PrevTo)    AS pOrderValue", PD())).First();
+
+                // ---------------------------------------------------------
+                // 3.17 Pending orders — approved, not short-closed OA lines with
+                // quantity still to invoice (the order book rule above). Due date =
+                // our committed date, else the customer's delivery date.
+                // ---------------------------------------------------------
+                var pendRows = await Rows(con, @"
+                    SELECT m.DocSeries AS docSeries, m.DocNo AS docNo, m.DocAmdNo AS docAmdNo,
+                           CONVERT(char(10), m.DocDate, 23) AS oaDate,
+                           m.VendorName AS customer,
+                           ISNULL(d.PartDescription, '') AS part,
+                           ISNULL(d.Unit, '') AS unit,
+                           ISNULL(d.Qty, 0) AS orderQty,
+                           ISNULL(inv.Qty, 0) AS invoicedQty,
+                           ISNULL(d.Qty, 0) - ISNULL(inv.Qty, 0) AS pendingQty,
+                           CASE WHEN ISNULL(d.Qty, 0) > 0 THEN ISNULL(d.TotalValue, 0) / d.Qty ELSE 0 END
+                             * (ISNULL(d.Qty, 0) - ISNULL(inv.Qty, 0)) * " + Rate + @" AS value,
+                           CONVERT(char(10), COALESCE(d.CommittedDate, d.DeliveryDate), 23) AS dueDate
+                    FROM dbo.OAMst m
+                    JOIN dbo.OADtl d ON d.MTransNo = m.MTransNo AND d.DeleteStatus = 'N'
+                    OUTER APPLY (" + InvoicedQty + @") inv
+                    WHERE m.SubscID = @SubscID AND m.DeleteStatus = 'N' AND m.DocAmdStatus = 'N'
+                      AND m.LockStatus = 'Y' AND ISNULL(m.DocStatus, 'N') <> 'Y'
+                      AND m.DocDate <= @AsOf
+                      AND ISNULL(d.Qty, 0) - ISNULL(inv.Qty, 0) > 0", PD());
+
+                var pendingLines = pendRows.Select(r =>
+                {
+                    var due = Str(r, "dueDate");
+                    var hasDue = DateTime.TryParseExact(due, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var dueDt);
+                    var daysLate = hasDue && dueDt < asOf ? (asOf - dueDt).Days : 0;
+                    return new
+                    {
+                        docSeries = Str(r, "docSeries"),
+                        docNo = Int(r, "docNo"),
+                        docAmdNo = Int(r, "docAmdNo"),
+                        oaDate = Str(r, "oaDate"),
+                        customer = Str(r, "customer"),
+                        part = Str(r, "part"),
+                        unit = Str(r, "unit"),
+                        orderQty = Dec(r, "orderQty"),
+                        invoicedQty = Dec(r, "invoicedQty"),
+                        pendingQty = Dec(r, "pendingQty"),
+                        value = Round(Dec(r, "value")),
+                        dueDate = due,
+                        daysLate,
+                        status = !hasDue ? "No Date" : dueDt < asOf ? "Overdue" : dueDt <= asOf.AddDays(6) ? "Due This Week" : "On Time"
+                    };
+                })
+                // Most urgent first: overdue (longest late first), then by due date; undated last.
+                .OrderBy(l => l.dueDate == "" ? 1 : 0).ThenBy(l => l.dueDate).ThenByDescending(l => l.value)
+                .ToList();
+
+                var pendingByCustomer = pendingLines
+                    .GroupBy(l => l.customer)
+                    .Select(g => new { customer = g.Key, lines = g.Count(), value = Round(g.Sum(l => l.value)), isOther = false })
+                    .OrderByDescending(c => c.value)
+                    .ToList();
+                if (pendingByCustomer.Count > ChartLimit)
+                {
+                    var rest = pendingByCustomer.Skip(ChartLimit).ToList();
+                    pendingByCustomer = pendingByCustomer.Take(ChartLimit)
+                        .Append(new { customer = "Others (" + rest.Count + ")", lines = rest.Sum(c => c.lines), value = Round(rest.Sum(c => c.value)), isOther = true })
+                        .ToList();
+                }
+
+                var overdueLines = pendingLines.Where(l => l.status == "Overdue").ToList();
+                var pendingOrders = new
+                {
+                    lines = pendingLines.Count,
+                    orders = pendingLines.Select(l => l.docSeries + "|" + l.docNo).Distinct().Count(),
+                    customers = pendingLines.Select(l => l.customer).Distinct().Count(),
+                    value = Round(pendingLines.Sum(l => l.value)),
+                    overdueLines = overdueLines.Count,
+                    overdueValue = Round(overdueLines.Sum(l => l.value)),
+                    dueThisWeekLines = pendingLines.Count(l => l.status == "Due This Week"),
+                    listTotal = pendingLines.Count,
+                    list = pendingLines.Take(ListLimit).ToList(),
+                    byCustomer = pendingByCustomer
+                };
+
+                // ---------------------------------------------------------
+                // 3.18 Orders booked recently — approved OAs dated in the last
+                // RecentOrderDays days, newest first.
+                // ---------------------------------------------------------
+                var recentRows = await Rows(con, @"
+                    SELECT m.DocSeries AS docSeries, m.DocNo AS docNo, m.DocAmdNo AS docAmdNo,
+                           CONVERT(char(10), m.DocDate, 23) AS date,
+                           m.VendorName AS customer, m.SalesExec AS salesExec,
+                           ISNULL(m.NetValue, 0) * " + Rate + @" AS value,
+                           (SELECT COUNT(*) FROM dbo.OADtl d WHERE d.MTransNo = m.MTransNo AND d.DeleteStatus = 'N') AS lines
+                    FROM dbo.OAMst m
+                    WHERE m.SubscID = @SubscID AND m.DeleteStatus = 'N' AND m.DocAmdStatus = 'N'
+                      AND m.LockStatus = 'Y'
+                      AND m.DocDate BETWEEN @RecentFrom AND @AsOf
+                    ORDER BY m.DocDate DESC, m.DocNo DESC", PD());
+                var recentOrders = new
+                {
+                    fromDate = recentFrom.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                    count = recentRows.Count,
+                    value = Round(recentRows.Sum(r => Dec(r, "value"))),
+                    list = recentRows.Take(ListLimit).Select(r => new
+                    {
+                        docSeries = Str(r, "docSeries"),
+                        docNo = Int(r, "docNo"),
+                        docAmdNo = Int(r, "docAmdNo"),
+                        date = Str(r, "date"),
+                        customer = Str(r, "customer"),
+                        salesExec = Str(r, "salesExec"),
+                        lines = Int(r, "lines"),
+                        value = Round(Dec(r, "value"))
+                    }).ToList()
+                };
+
                 // Fallback series for a reference without one: the latest quotation's.
                 var docSeries = followUpsDue.Select(f => f.docSeries).FirstOrDefault(s => s != "") ?? "";
 
@@ -609,7 +781,36 @@ namespace EMSAPI.Controllers
                     },
                     followUpsDue,
                     pendingActions,
-                    datedPending = dated
+                    datedPending = dated,
+                    daily = new
+                    {
+                        today = new
+                        {
+                            date = asOf.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                            invoiced = Round(Dec(day, "todayInvoiced")), invoices = Int(day, "todayInvoices"),
+                            ordersBooked = Int(day, "todayOrders"), orderValue = Round(Dec(day, "todayOrderValue"))
+                        },
+                        yesterday = new
+                        {
+                            date = yesterday.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                            invoiced = Round(Dec(day, "yInvoiced")), invoices = Int(day, "yInvoices"),
+                            ordersBooked = Int(day, "yOrders"), orderValue = Round(Dec(day, "yOrderValue"))
+                        },
+                        monthToDate = new
+                        {
+                            fromDate = monthStart.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                            invoiced = Round(Dec(day, "mInvoiced")), invoices = Int(day, "mInvoices"),
+                            ordersBooked = Int(day, "mOrders"), orderValue = Round(Dec(day, "mOrderValue"))
+                        },
+                        lastMonthSamePeriod = new
+                        {
+                            fromDate = prevFrom.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                            toDate = prevTo.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                            invoiced = Round(Dec(day, "pInvoiced")), orderValue = Round(Dec(day, "pOrderValue"))
+                        }
+                    },
+                    pendingOrders,
+                    recentOrders
                 };
 
                 return OkResult(data, "Data found.");

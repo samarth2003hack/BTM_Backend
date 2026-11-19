@@ -64,6 +64,11 @@ namespace EMSAPI.Controllers
         private const int ScorecardCount = 6;
         private const int RecentCount = 8;
 
+        // Daily view and pending material (client's daily dashboard): a list carries at
+        // most ListLimit rows plus its full count; a chart its top ChartLimit plus one "Others".
+        private const int ListLimit = 50;
+        private const int ChartLimit = 10;
+
         private const string Rate = "ISNULL(NULLIF(m.CurrencyRate, 0), 1)";
 
         // Value of one unit on GRN line d, on the same basis as GRNMst.NetValue
@@ -817,6 +822,172 @@ namespace EMSAPI.Controllers
                     date = Str(r, "date")
                 }).ToList();
 
+                // ---------------------------------------------------------
+                // 3.21 Daily view (client's daily dashboard): material received
+                // today, yesterday and this month so far (confirmed GRNs, same rule
+                // as the monthly "received" trend), against the same days of last
+                // month. "Yesterday" is the calendar day before asOfDate.
+                // ---------------------------------------------------------
+                var yesterday = asOf.AddDays(-1);
+                var monthStart = new DateTime(asOf.Year, asOf.Month, 1);
+                var prevFrom = monthStart.AddMonths(-1);
+                var prevTo = prevFrom.AddDays(asOf.Day - 1);
+                if (prevTo >= monthStart) prevTo = monthStart.AddDays(-1);
+                SqlParameter[] PD() => new[]
+                {
+                    new SqlParameter("@SubscID", SqlDbType.Int) { Value = subscID },
+                    new SqlParameter("@AsOf", SqlDbType.Date) { Value = asOf },
+                    new SqlParameter("@Yesterday", SqlDbType.Date) { Value = yesterday },
+                    new SqlParameter("@MonthStart", SqlDbType.Date) { Value = monthStart },
+                    new SqlParameter("@PrevFrom", SqlDbType.Date) { Value = prevFrom },
+                    new SqlParameter("@PrevTo", SqlDbType.Date) { Value = prevTo }
+                };
+                var day = (await Rows(con, @"
+                    WITH g AS (
+                        SELECT m.DocDate, ISNULL(m.NetValue, 0) * " + Rate + @" AS val,
+                               (SELECT COUNT(*) FROM dbo.GRNDtl d WHERE d.MTransNo = m.MTransNo AND d.DeleteStatus = 'N') AS lines
+                        FROM dbo.GRNMst m
+                        WHERE m.SubscID = @SubscID AND m.DeleteStatus = 'N' AND m.LockStatus = 'Y'
+                          AND m.DocDate BETWEEN @PrevFrom AND @AsOf
+                    ),
+                    po AS (
+                        SELECT m.DocDate, ISNULL(m.NetValue, 0) * " + Rate + @" AS val
+                        FROM dbo.POMst m
+                        WHERE m.SubscID = @SubscID AND m.DeleteStatus = 'N' AND m.DocAmdStatus = 'N'
+                          AND m.LockStatus = 'Y' AND m.DocDate BETWEEN @MonthStart AND @AsOf
+                    )
+                    SELECT
+                      (SELECT COUNT(*) FROM g WHERE DocDate = @AsOf)                         AS tGrns,
+                      (SELECT SUM(lines) FROM g WHERE DocDate = @AsOf)                       AS tLines,
+                      (SELECT SUM(val) FROM g WHERE DocDate = @AsOf)                         AS tValue,
+                      (SELECT COUNT(*) FROM g WHERE DocDate = @Yesterday)                    AS yGrns,
+                      (SELECT SUM(lines) FROM g WHERE DocDate = @Yesterday)                  AS yLines,
+                      (SELECT SUM(val) FROM g WHERE DocDate = @Yesterday)                    AS yValue,
+                      (SELECT COUNT(*) FROM g WHERE DocDate BETWEEN @MonthStart AND @AsOf)   AS mGrns,
+                      (SELECT SUM(val) FROM g WHERE DocDate BETWEEN @MonthStart AND @AsOf)   AS mValue,
+                      (SELECT SUM(val) FROM g WHERE DocDate BETWEEN @PrevFrom AND @PrevTo)   AS pValue,
+                      (SELECT COUNT(*) FROM po)                                              AS mPos,
+                      (SELECT SUM(val) FROM po)                                              AS mPoValue,
+                      (SELECT CONVERT(char(10), MAX(m.DocDate), 23) FROM dbo.GRNMst m
+                        WHERE m.SubscID = @SubscID AND m.DeleteStatus = 'N' AND m.LockStatus = 'Y'
+                          AND m.DocDate <= @AsOf)                                            AS lastReceipt", PD())).First();
+
+                // ---------------------------------------------------------
+                // 3.22 Material received yesterday — the lines of yesterday's
+                // confirmed GRNs, with their QC state.
+                // ---------------------------------------------------------
+                var yRows = await Rows(con, @"
+                    SELECT m.DocSeries AS docSeries, m.DocNo AS docNo,
+                           po.DocSeries AS poSeries, po.DocNo AS poNo, m.TargetType AS targetType,
+                           m.VendorName AS supplier,
+                           COALESCE(NULLIF(d.PartDescription, ''), d.PartCode, '') AS part,
+                           ISNULL(d.Grade, '') AS grade,
+                           ISNULL(d.RecQty, 0) AS recQty, ISNULL(d.AccQty, 0) AS accQty, ISNULL(d.RejQty, 0) AS rejQty,
+                           ISNULL(d.Unit, '') AS uom,
+                           " + LineUnitValue + @" * ISNULL(d.BillQty, 0) * " + Rate + @" AS value,
+                           CASE WHEN m.GRNType IN ('Q', 'C') THEN 'Inspected' ELSE 'Pending QC' END AS qc
+                    FROM dbo.GRNMst m
+                    JOIN dbo.GRNDtl d ON d.MTransNo = m.MTransNo AND d.DeleteStatus = 'N'
+                    LEFT JOIN dbo.POMst po ON m.TargetType = 'PO' AND po.MTransNo = m.TargetTransNo
+                    WHERE m.SubscID = @SubscID AND m.DeleteStatus = 'N' AND m.LockStatus = 'Y'
+                      AND m.DocDate = @Yesterday
+                    ORDER BY m.DocNo, d.SlNo", PD());
+                var receivedYesterday = new
+                {
+                    date = yesterday.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                    total = yRows.Count,
+                    list = yRows.Take(ListLimit).Select(r => new
+                    {
+                        grnNo = Ref(Str(r, "docSeries"), Int(r, "docNo")),
+                        poNo = Int(r, "poNo") > 0 ? Ref(Str(r, "poSeries"), Int(r, "poNo"))
+                             : (Str(r, "targetType") == "" ? "Direct" : Str(r, "targetType")),
+                        supplier = Str(r, "supplier"),
+                        part = Str(r, "part"),
+                        grade = Str(r, "grade"),
+                        recQty = Dec(r, "recQty"),
+                        accQty = Dec(r, "accQty"),
+                        rejQty = Dec(r, "rejQty"),
+                        uom = Str(r, "uom"),
+                        value = Round(Dec(r, "value")),
+                        qc = Str(r, "qc")
+                    }).ToList()
+                };
+
+                // ---------------------------------------------------------
+                // 3.23 Pending material — every approved, live, not-closed PO line
+                // with quantity still to receive (the open PO value rule above),
+                // dated or not. Due date = line delivery date, else the PO due date.
+                // ---------------------------------------------------------
+                var pmRows = await Rows(con, @"
+                    SELECT m.DocSeries AS docSeries, m.DocNo AS docNo,
+                           CONVERT(char(10), m.DocDate, 23) AS poDate,
+                           m.VendorName AS supplier,
+                           COALESCE(NULLIF(d.PartDescription, ''), d.PartCode, '') AS part,
+                           ISNULL(d.Grade, '') AS grade,
+                           ISNULL(d.Qty, 0) AS orderedQty,
+                           ISNULL(g.Qty, 0) AS receivedQty,
+                           ISNULL(d.Qty, 0) - ISNULL(g.Qty, 0) AS pendingQty,
+                           ISNULL(d.Unit, '') AS uom,
+                           CASE WHEN ISNULL(d.Qty, 0) > 0 THEN ISNULL(d.TotalValue, 0) / d.Qty ELSE 0 END
+                             * (ISNULL(d.Qty, 0) - ISNULL(g.Qty, 0)) * " + Rate + @" AS value,
+                           CONVERT(char(10), ISNULL(d.DeleveryDate, m.DueDate), 23) AS dueDate
+                    FROM dbo.POMst m
+                    JOIN dbo.PODtl d ON d.MTransNo = m.MTransNo AND d.DeleteStatus = 'N'
+                    OUTER APPLY (" + ReceivedQty + @") g
+                    WHERE m.SubscID = @SubscID AND m.DeleteStatus = 'N' AND m.DocAmdStatus = 'N'
+                      AND m.LockStatus = 'Y' AND ISNULL(RTRIM(m.DocStatus), '') <> 'Y'
+                      AND m.DocDate <= @AsOf
+                      AND ISNULL(d.Qty, 0) - ISNULL(g.Qty, 0) > 0", PD());
+                var pmLines = pmRows.Select(r =>
+                {
+                    var due = Str(r, "dueDate");
+                    var hasDue = DateTime.TryParseExact(due, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var dueDt);
+                    return new
+                    {
+                        poNo = Ref(Str(r, "docSeries"), Int(r, "docNo")),
+                        poDate = Str(r, "poDate"),
+                        supplier = Str(r, "supplier"),
+                        part = Str(r, "part"),
+                        grade = Str(r, "grade"),
+                        orderedQty = Dec(r, "orderedQty"),
+                        receivedQty = Dec(r, "receivedQty"),
+                        pendingQty = Dec(r, "pendingQty"),
+                        uom = Str(r, "uom"),
+                        value = Round(Dec(r, "value")),
+                        dueDate = due,
+                        daysLate = hasDue && dueDt < asOf ? (asOf - dueDt).Days : 0,
+                        status = !hasDue ? "No Date" : dueDt < asOf ? "Overdue" : dueDt <= asOf.AddDays(6) ? "Due This Week" : "On Time"
+                    };
+                })
+                .OrderBy(l => l.dueDate == "" ? 1 : 0).ThenBy(l => l.dueDate).ThenByDescending(l => l.value)
+                .ToList();
+                var pmBySupplier = pmLines
+                    .GroupBy(l => l.supplier)
+                    .Select(gr => new { supplier = gr.Key, lines = gr.Count(), value = Round(gr.Sum(l => l.value)), overdueLines = gr.Count(l => l.status == "Overdue"), isOther = false })
+                    .OrderByDescending(s => s.value)
+                    .ToList();
+                if (pmBySupplier.Count > ChartLimit)
+                {
+                    var rest = pmBySupplier.Skip(ChartLimit).ToList();
+                    pmBySupplier = pmBySupplier.Take(ChartLimit)
+                        .Append(new { supplier = "Others (" + rest.Count + ")", lines = rest.Sum(s => s.lines), value = Round(rest.Sum(s => s.value)), overdueLines = rest.Sum(s => s.overdueLines), isOther = true })
+                        .ToList();
+                }
+                var pmOverdue = pmLines.Where(l => l.status == "Overdue").ToList();
+                var pendingMaterial = new
+                {
+                    lines = pmLines.Count,
+                    pos = pmLines.Select(l => l.poNo).Distinct().Count(),
+                    suppliers = pmLines.Select(l => l.supplier).Distinct().Count(),
+                    value = Round(pmLines.Sum(l => l.value)),
+                    overdueLines = pmOverdue.Count,
+                    overdueValue = Round(pmOverdue.Sum(l => l.value)),
+                    dueThisWeekLines = pmLines.Count(l => l.status == "Due This Week"),
+                    listTotal = pmLines.Count,
+                    list = pmLines.Take(ListLimit).ToList(),
+                    bySupplier = pmBySupplier
+                };
+
                 var pendingCounts = new
                 {
                     prApproval = Int(pend, "prApproval"),
@@ -924,7 +1095,27 @@ namespace EMSAPI.Controllers
                         valueSent = Round(Dec(rgpSum, "valueSent"))
                     },
                     openRgps,
-                    datedPending
+                    datedPending,
+                    daily = new
+                    {
+                        today = new { date = asOf.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), grns = Int(day, "tGrns"), lines = Int(day, "tLines"), value = Round(Dec(day, "tValue")) },
+                        yesterday = new { date = yesterday.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), grns = Int(day, "yGrns"), lines = Int(day, "yLines"), value = Round(Dec(day, "yValue")) },
+                        monthToDate = new
+                        {
+                            fromDate = monthStart.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                            grns = Int(day, "mGrns"), value = Round(Dec(day, "mValue")),
+                            posRaised = Int(day, "mPos"), poValue = Round(Dec(day, "mPoValue"))
+                        },
+                        lastMonthSamePeriod = new
+                        {
+                            fromDate = prevFrom.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                            toDate = prevTo.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                            value = Round(Dec(day, "pValue"))
+                        },
+                        lastReceiptDate = Str(day, "lastReceipt")
+                    },
+                    receivedYesterday,
+                    pendingMaterial
                 };
 
                 return OkResult(data, "Data found.");
