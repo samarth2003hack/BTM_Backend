@@ -52,6 +52,11 @@ builder.Services.AddCors(options =>
 
 builder.Services.AddMemoryCache();
 
+// Short cache shared by the dashboard endpoints (Models/DashboardSupport.cs):
+// the same dashboard opened again within "Dashboards:CacheMinutes" is answered
+// from memory instead of re-running its queries.
+builder.Services.AddSingleton<DashboardCache>();
+
 // Who is signed in right now, so a browser that lost its session to a newer
 // sign-in can be told what happened instead of just failing. Singleton: the
 // register is the process's, not a request's. See Models/UserSessionRegistry.cs.

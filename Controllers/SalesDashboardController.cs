@@ -51,15 +51,18 @@ namespace EMSAPI.Controllers
     public class SalesDashboardController : EmsControllerBase
     {
         private readonly EMSContext db;
+        private readonly DashboardCache cache;
 
-        public SalesDashboardController(EMSContext context) => db = context;
+        public SalesDashboardController(EMSContext context, DashboardCache cache)
+        {
+            db = context;
+            this.cache = cache;
+        }
 
         // Days the page's alert / "next 5 days" view covers (ALERT_WINDOW_DAYS).
         private const int AgendaWindowDays = 5;
 
-        // The page's categorical palette has four slots: three named groups and
-        // "Others" at most, and twelve key customers in the monthly table.
-        private const int MaxCategorySlices = 4;
+        // Key customers shown in the monthly table.
         private const int KeyCustomers = 12;
 
         // Daily view and order lists (client's daily dashboard): a list carries at most
@@ -92,13 +95,28 @@ namespace EMSAPI.Controllers
                   AND r.DocYear   = c.DocYear
                   AND r.DocNo     = c.DocNo";
 
+        // Cached for a few minutes (Models/DashboardSupport.cs); refresh=true rebuilds.
         [HttpGet("GetDashboard/{subscID}")]
-        public async Task<IActionResult> GetDashboard(int subscID, [FromQuery] DateTime? asOfDate = null)
+        public async Task<IActionResult> GetDashboard(int subscID, [FromQuery] DateTime? asOfDate = null, [FromQuery] bool refresh = false)
         {
             if (subscID <= 0)
                 return BadRequestResult("Invalid Subscription.");
 
             var asOf = (asOfDate ?? DateTime.Today).Date;
+            try
+            {
+                var data = await cache.GetOrBuild("Sales", DashboardCache.KeyOf(subscID, Dash.Iso(asOf)), refresh,
+                    async _ => DashboardCache.FromObject(await BuildDashboard(subscID, asOf)));
+                return OkResult(data, "Data found.");
+            }
+            catch (Exception ex)
+            {
+                return ErrorResult(ex);
+            }
+        }
+
+        private async Task<object> BuildDashboard(int subscID, DateTime asOf)
+        {
             var fyStart = new DateTime(asOf.Month >= 4 ? asOf.Year : asOf.Year - 1, 4, 1);
             var windowEnd = asOf.AddDays(AgendaWindowDays - 1);
 
@@ -110,7 +128,6 @@ namespace EMSAPI.Controllers
                 new SqlParameter("@WindowEnd", SqlDbType.Date) { Value = windowEnd }
             };
 
-            try
             {
                 var con = db.Database.GetDbConnection();
                 if (con.State != ConnectionState.Open)
@@ -358,27 +375,11 @@ namespace EMSAPI.Controllers
                 }).ToList();
 
                 // ---------------------------------------------------------
-                // 3.7 Sales by customer category (INR invoiced this year)
-                // ---------------------------------------------------------
-                var categoryRows = await Rows(con, @"
-                    SELECT ISNULL(NULLIF(RTRIM(cm.Category), ''), 'Uncategorised') AS label,
-                           SUM(ISNULL(m.NetValue, 0) * " + Rate + @") AS value
-                    FROM dbo.STxnMst m
-                    LEFT JOIN dbo.CustomerMaster cm ON cm.MTransNo = m.VendorNo
-                    WHERE m.SubscID = @SubscID AND m.DeleteStatus = 'N'
-                      AND m.DocDate BETWEEN @FromDate AND @AsOf
-                    GROUP BY ISNULL(NULLIF(RTRIM(cm.Category), ''), 'Uncategorised')
-                    ORDER BY value DESC", P());
-                var customerCategorySales = TopWithOthers(
-                    categoryRows.Select(r => (Str(r, "label"), Round(Dec(r, "value")))).ToList(), MaxCategorySlices);
-
-                // ---------------------------------------------------------
                 // 3.7a Customer-wise monthly sales — key customers
                 // ---------------------------------------------------------
                 var custRows = await Rows(con, @"
                     SELECT m.VendorNo                                                   AS vendorNo,
                            MAX(COALESCE(NULLIF(RTRIM(cm.CustomerName), ''), m.VendorName)) AS customer,
-                           MAX(ISNULL(NULLIF(RTRIM(cm.Category), ''), 'Uncategorised')) AS category,
                            DATEFROMPARTS(YEAR(m.DocDate), MONTH(m.DocDate), 1)          AS mon,
                            SUM(ISNULL(m.NetValue, 0) * " + Rate + @")                   AS val
                     FROM dbo.STxnMst m
@@ -387,20 +388,15 @@ namespace EMSAPI.Controllers
                       AND m.DocDate BETWEEN @FromDate AND @AsOf
                     GROUP BY m.VendorNo, DATEFROMPARTS(YEAR(m.DocDate), MONTH(m.DocDate), 1)", P());
 
-                // A customer outside the top categories is shown under "Others",
-                // so the table's category filter matches the doughnut's slices.
-                var namedCategories = customerCategorySales.Select(c => c.label).ToHashSet();
                 var customerMonthlySales = custRows
                     .GroupBy(r => Int(r, "vendorNo"))
                     .Select(g =>
                     {
                         var monthly = new decimal[months.Count];
                         foreach (var r in g) { var i = MonthIndex(r["mon"]); if (i >= 0 && i < months.Count) monthly[i] += Dec(r, "val"); }
-                        var category = Str(g.First(), "category");
                         return new
                         {
                             customer = Str(g.First(), "customer"),
-                            category = namedCategories.Contains(category) ? category : "Others",
                             monthly = monthly.Select(Round).ToArray()
                         };
                     })
@@ -767,7 +763,6 @@ namespace EMSAPI.Controllers
                     },
                     followUpStatus,
                     quotationAgeing,
-                    customerCategorySales = customerCategorySales.Select(c => new { c.label, c.value }).ToList(),
                     customerMonthlySales,
                     executivePerformance,
                     gstSummary = new
@@ -813,11 +808,7 @@ namespace EMSAPI.Controllers
                     recentOrders
                 };
 
-                return OkResult(data, "Data found.");
-            }
-            catch (Exception ex)
-            {
-                return ErrorResult(ex);
+                return data;
             }
         }
 
@@ -861,18 +852,5 @@ namespace EMSAPI.Controllers
         private static bool InWindow(string isoDate, DateTime from, DateTime to) =>
             DateTime.TryParseExact(isoDate, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var d)
             && d >= from && d <= to;
-
-        /// <summary>
-        /// The largest groups by value; when there are more than <paramref name="slots"/>,
-        /// the tail is folded into one "Others" entry so the total is unchanged.
-        /// </summary>
-        private static List<(string label, decimal value)> TopWithOthers(List<(string label, decimal value)> items, int slots)
-        {
-            var sorted = items.Where(i => i.value != 0).OrderByDescending(i => i.value).ToList();
-            if (sorted.Count <= slots) return sorted;
-            var head = sorted.Take(slots - 1).ToList();
-            head.Add(("Others", sorted.Skip(slots - 1).Sum(i => i.value)));
-            return head;
-        }
     }
 }

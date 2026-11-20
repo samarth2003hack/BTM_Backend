@@ -54,8 +54,13 @@ namespace EMSAPI.Controllers
     public class PurchaseDashboardController : EmsControllerBase
     {
         private readonly EMSContext db;
+        private readonly DashboardCache cache;
 
-        public PurchaseDashboardController(EMSContext context) => db = context;
+        public PurchaseDashboardController(EMSContext context, DashboardCache cache)
+        {
+            db = context;
+            this.cache = cache;
+        }
 
         private const int AgendaWindowDays = 5;   // the page's ALERT_WINDOW_DAYS
         private const int MaxCategorySlices = 4;  // the page's palette has four slots
@@ -104,13 +109,28 @@ namespace EMSAPI.Controllers
                                    WHERE qq.MTransNo = m.TargetTransNo))
                     ) prx";
 
+        // Cached for a few minutes (Models/DashboardSupport.cs); refresh=true rebuilds.
         [HttpGet("GetDashboard/{subscID}")]
-        public async Task<IActionResult> GetDashboard(int subscID, [FromQuery] DateTime? asOfDate = null)
+        public async Task<IActionResult> GetDashboard(int subscID, [FromQuery] DateTime? asOfDate = null, [FromQuery] bool refresh = false)
         {
             if (subscID <= 0)
                 return BadRequestResult("Invalid Subscription.");
 
             var asOf = (asOfDate ?? DateTime.Today).Date;
+            try
+            {
+                var data = await cache.GetOrBuild("Purchase", DashboardCache.KeyOf(subscID, Dash.Iso(asOf)), refresh,
+                    async _ => DashboardCache.FromObject(await BuildDashboard(subscID, asOf)));
+                return OkResult(data, "Data found.");
+            }
+            catch (Exception ex)
+            {
+                return ErrorResult(ex);
+            }
+        }
+
+        private async Task<object> BuildDashboard(int subscID, DateTime asOf)
+        {
             var fyStart = new DateTime(asOf.Month >= 4 ? asOf.Year : asOf.Year - 1, 4, 1);
             var windowEnd = asOf.AddDays(AgendaWindowDays - 1);
 
@@ -122,7 +142,6 @@ namespace EMSAPI.Controllers
                 new SqlParameter("@WindowEnd", SqlDbType.Date) { Value = windowEnd }
             };
 
-            try
             {
                 var con = db.Database.GetDbConnection();
                 if (con.State != ConnectionState.Open)
@@ -1118,11 +1137,7 @@ namespace EMSAPI.Controllers
                     pendingMaterial
                 };
 
-                return OkResult(data, "Data found.");
-            }
-            catch (Exception ex)
-            {
-                return ErrorResult(ex);
+                return data;
             }
         }
 
