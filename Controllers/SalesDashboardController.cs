@@ -626,7 +626,7 @@ namespace EMSAPI.Controllers
                            ISNULL(d.Qty, 0) - ISNULL(inv.Qty, 0) AS pendingQty,
                            CASE WHEN ISNULL(d.Qty, 0) > 0 THEN ISNULL(d.TotalValue, 0) / d.Qty ELSE 0 END
                              * (ISNULL(d.Qty, 0) - ISNULL(inv.Qty, 0)) * " + Rate + @" AS value,
-                           CONVERT(char(10), COALESCE(d.CommittedDate, d.DeliveryDate), 23) AS dueDate
+                           CONVERT(char(10), COALESCE(d.CommittedDate, d.DeliveryDate, m.DueDate), 23) AS dueDate
                     FROM dbo.OAMst m
                     JOIN dbo.OADtl d ON d.MTransNo = m.MTransNo AND d.DeleteStatus = 'N'
                     OUTER APPLY (" + InvoicedQty + @") inv

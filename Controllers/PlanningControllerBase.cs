@@ -260,7 +260,9 @@ namespace EMSAPI.Controllers
                        ISNULL(m.DocSeries, '') AS docSeries, CONVERT(char(10), m.DocDate, 23) AS oaDate,
                        ISNULL(m.VendorName, '') AS customer, ISNULL(m.RefNo, '') AS poNo, CONVERT(char(10), m.RefDate, 23) AS poDate,
                        d.PartNo AS partNo, LTRIM(RTRIM(ISNULL(d.MocCode, ''))) AS grade, ISNULL(d.Qty, 0) AS qty, ISNULL(d.Rate, 0) AS rate,
-                       CONVERT(char(10), d.DeliveryDate, 23) AS deliveryDate, CONVERT(char(10), d.CommittedDate, 23) AS committedDate,
+                       -- A line without its own delivery date takes the OA header's Delivery Date (OAMst.DueDate),
+                       -- as the sales reports do; otherwise plan, forge-by and pending reports show it blank.
+                       CONVERT(char(10), COALESCE(d.DeliveryDate, m.DueDate), 23) AS deliveryDate, CONVERT(char(10), d.CommittedDate, 23) AS committedDate,
                        ISNULL(d.Priority, 'Normal') AS priority, ISNULL(d.CustomerMaterial, 'N') AS customerMaterial,
                        ISNULL(b.Qty, 0) AS dispatched
                   FROM dbo.OAMst m

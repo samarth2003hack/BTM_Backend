@@ -102,6 +102,74 @@ namespace EMSAPI.Controllers
             return rows.Count > 0 ? Convert.ToString(rows[0]["s"]) ?? "O" : "O";
         }
 
+        /// <summary>
+        /// What is left of one heat of a part: the heat's quantity less what
+        /// live issue lines took from it, plus what came back from those lines
+        /// as re-usable bar (Issue Return types Unused and End Piece; Scrap does
+        /// not go back to the heat). Own bar ('O') counts approved Heat No
+        /// entries and approved own opening stock; customer bar ('C') counts
+        /// what the customer sent on that OA (inward + customer opening stock).
+        /// The line being edited is left out of "taken" and its own returns are
+        /// returned separately. HeatQty 0 = no such heat (the SP reports that).
+        /// </summary>
+        protected async Task<(decimal HeatQty, decimal Taken, decimal OwnReturned)> HeatBalanceOf(
+            string source, string heatNo, int partNo, string? grade, int? oaYearN, int? oaNoN, int subscID, int excludeTransSlNo)
+        {
+            var rows = await db.PmQueryRowsAsync(@"
+                SELECT
+                    CASE WHEN @Src = 'C' THEN
+                        ISNULL((SELECT SUM(d.Qty) FROM dbo.CustMatInwardDtl d
+                                  JOIN dbo.CustMatInwardMst m ON m.MTransNo = d.MTransNo AND m.DeleteStatus = 'N' AND m.DocType = 'I'
+                                 WHERE m.SubscID = @S AND d.DeleteStatus = 'N' AND d.PartNo = @P
+                                   AND m.OAYear = @OY AND m.OANo = @ON AND UPPER(LTRIM(RTRIM(d.HeatNo))) = @H
+                                   AND (@G = '' OR LTRIM(RTRIM(ISNULL(d.Grade, ''))) IN ('', @G))), 0)
+                      + ISNULL((SELECT SUM(d.Qty) FROM dbo.OpeningStockDtl d
+                                  JOIN dbo.OpeningStockMst o ON o.MTransNo = d.MTransNo AND o.DeleteStatus = 'N'
+                                                           AND o.LockStatus = 'Y' AND o.StockType = 'CUSTOMER'
+                                 WHERE o.SubscID = @S AND d.DeleteStatus = 'N' AND d.PartNo = @P
+                                   AND o.OAYear = @OY AND o.OANo = @ON AND UPPER(LTRIM(RTRIM(d.HeatNo))) = @H
+                                   AND (@G = '' OR LTRIM(RTRIM(ISNULL(d.Grade, ''))) IN ('', @G))), 0)
+                    ELSE
+                        ISNULL((SELECT SUM(d.Qty) FROM dbo.HeatNoDtl d
+                                  JOIN dbo.HeatNoMst m ON m.MTransNo = d.MTransNo AND m.DeleteStatus = 'N' AND m.LockStatus = 'Y'
+                                 WHERE d.SubscID = @S AND d.DeleteStatus = 'N' AND d.PartNo = @P
+                                   AND UPPER(LTRIM(RTRIM(d.HeatNo))) = @H
+                                   AND (@G = '' OR LTRIM(RTRIM(ISNULL(NULLIF(LTRIM(RTRIM(d.Grade)), ''), ISNULL(m.Grade, '')))) IN ('', @G))), 0)
+                      + ISNULL((SELECT SUM(d.Qty) FROM dbo.OpeningStockDtl d
+                                  JOIN dbo.OpeningStockMst o ON o.MTransNo = d.MTransNo AND o.DeleteStatus = 'N'
+                                                           AND o.LockStatus = 'Y' AND o.StockType = 'OWN'
+                                 WHERE o.SubscID = @S AND d.DeleteStatus = 'N' AND d.PartNo = @P
+                                   AND UPPER(LTRIM(RTRIM(d.HeatNo))) = @H
+                                   AND (@G = '' OR LTRIM(RTRIM(ISNULL(d.Grade, ''))) IN ('', @G))), 0)
+                    END AS heatQty,
+                    ISNULL((SELECT SUM(i.Qty) - ISNULL(SUM(r.q), 0)
+                              FROM dbo.StoreIssueDtl i
+                              JOIN dbo.StoreIssueMst im ON im.MTransNo = i.MTransNo AND im.DeleteStatus = 'N'
+                             OUTER APPLY (" + ReusableReturnOfLine + @") r
+                             WHERE i.DeleteStatus = 'N' AND i.SubscID = @S AND i.PartNo = @P AND i.TransSlNo <> @Ex
+                               AND UPPER(LTRIM(RTRIM(i.HeatNo))) = @H
+                               AND ((@Src = 'C' AND i.MaterialSource = 'C' AND i.OAYear = @OY AND i.OANo = @ON)
+                                 OR (@Src <> 'C' AND ISNULL(i.MaterialSource, 'O') <> 'C'))), 0) AS taken,
+                    ISNULL((SELECT SUM(rd.RTNQty) FROM dbo.StoreReturnsDtl rd
+                              JOIN dbo.StoreReturnsMst rm ON rm.MTransNo = rd.MTransNo AND rm.DeleteStatus = 'N'
+                             WHERE rd.LinkNo = @Ex AND @Ex > 0 AND ISNULL(rd.DeleteStatus, 'N') = 'N'
+                               AND ISNULL(NULLIF(rd.ReturnType, ''), 'Unused') IN ('Unused', 'End Piece')), 0) AS ownReturned",
+                new SqlParameter("@Src", source), new SqlParameter("@H", (heatNo ?? "").Trim().ToUpperInvariant()),
+                new SqlParameter("@S", subscID), new SqlParameter("@P", partNo), new SqlParameter("@G", NormGrade(grade)),
+                new SqlParameter("@OY", oaYearN ?? 0), new SqlParameter("@ON", oaNoN ?? 0), new SqlParameter("@Ex", excludeTransSlNo));
+            if (rows.Count == 0) return (0, 0, 0);
+            return (Convert.ToDecimal(rows[0]["heatQty"] ?? 0m), Convert.ToDecimal(rows[0]["taken"] ?? 0m),
+                    Convert.ToDecimal(rows[0]["ownReturned"] ?? 0m));
+        }
+
+        /// <summary>Re-usable bar returned against issue line i (OUTER APPLY body, alias r.q).</summary>
+        protected const string ReusableReturnOfLine = @"
+                SELECT SUM(rd.RTNQty) AS q
+                  FROM dbo.StoreReturnsDtl rd
+                  JOIN dbo.StoreReturnsMst rm ON rm.MTransNo = rd.MTransNo AND rm.DeleteStatus = 'N'
+                 WHERE rd.LinkNo = i.TransSlNo AND ISNULL(rd.DeleteStatus, 'N') = 'N'
+                   AND ISNULL(NULLIF(rd.ReturnType, ''), 'Unused') IN ('Unused', 'End Piece')";
+
         protected static string Label(string? code, string? name) =>
             !string.IsNullOrWhiteSpace(code) ? code.Trim() : (name ?? "").Trim();
 
@@ -580,6 +648,25 @@ namespace EMSAPI.Controllers
                     if (dto.Qty > stock)
                         return ConflictResult($"Only {Qty(stock)} {src.Unit} of {label}" +
                             (src.Grade.Length > 0 ? $" (grade {src.Grade})" : "") + " is in stock.");
+                }
+
+                // Heat balance: a line that names a heat cannot take more than
+                // is left of that heat (an unknown heat is refused by the SP).
+                var heat = (dto.HeatNo ?? "").Trim().ToUpperInvariant();
+                if (heat.Length > 0)
+                {
+                    var (heatQty, taken, ownRet) = await HeatBalanceOf(source, heat, src.PartNo, src.Grade,
+                        src.OAYear, src.OANo, h.SubscID, cur?.TransSlNo ?? 0);
+                    if (heatQty > 0)
+                    {
+                        var maxQty = heatQty - taken + ownRet;
+                        if (dto.Qty > maxQty)
+                            return ConflictResult($"Heat No {heat} of {label}: {Qty(heatQty)} {src.Unit} received, " +
+                                $"{Qty(Math.Max(0, taken))} {src.Unit} issued on other lines, so this line can take at most " +
+                                $"{Qty(Math.Max(0, maxQty))} {src.Unit}" +
+                                (ownRet > 0 ? $" (counting {Qty(ownRet)} {src.Unit} already returned on this line)" : "") +
+                                $". Issue Qty {Qty(dto.Qty)} is above that.");
+                    }
                 }
 
                 if (src.OAYear > 0 || src.OANo > 0 || src.OAID > 0)

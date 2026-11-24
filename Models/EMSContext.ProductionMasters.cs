@@ -1,5 +1,6 @@
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using System.Data;
 
 namespace EMSAPI.Models
@@ -28,6 +29,9 @@ namespace EMSAPI.Models
 
             await using var cmd = con.CreateCommand();
             cmd.CommandText = sql;
+            // Inside a transaction (BeginTransactionAsync) a command on the same connection MUST carry it,
+            // or SQL Server refuses: "BeginExecuteReader requires the command to have a transaction ...".
+            cmd.Transaction = Database.CurrentTransaction?.GetDbTransaction();
             cmd.Parameters.AddRange(parameters);
 
             var rows = new List<Dictionary<string, object?>>();
