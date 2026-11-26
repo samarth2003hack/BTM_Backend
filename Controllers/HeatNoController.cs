@@ -604,7 +604,7 @@ namespace EMSAPI.Controllers
         /// Row: { heatNo, tcNo, tcDate, grade, unit, qty, issuedQty, balanceQty,
         ///        grnNo, grnTransNo, heatDocNo, transSlNo }
         /// issuedQty = Σ live StoreIssueDtl.Qty of this part carrying the heat, less the
-        /// re-usable bar returned on those lines (Issue Return Unused / End Piece).
+        /// unused bar returned on those lines (Issue Return type Unused; SQL 78: not End Piece or Scrap).
         /// A heat without a grade of its own matches every grade.
         /// </summary>
         [HttpGet("Dtl/GetByPart")]
@@ -655,11 +655,11 @@ namespace EMSAPI.Controllers
                              OUTER APPLY (SELECT SUM(i.Qty) - ISNULL(SUM(rr.q), 0) AS q
                                             FROM dbo.StoreIssueDtl i
                                             JOIN dbo.StoreIssueMst im ON im.MTransNo = i.MTransNo AND im.DeleteStatus = 'N'
-                                            -- re-usable bar returned on the line (Unused / End Piece) goes back to the heat
+                                            -- unused bar returned on the line goes back to the heat (SQL 78: end pieces and scrap do not)
                                             OUTER APPLY (SELECT SUM(rd.RTNQty) AS q FROM dbo.StoreReturnsDtl rd
                                                            JOIN dbo.StoreReturnsMst rm ON rm.MTransNo = rd.MTransNo AND rm.DeleteStatus = 'N'
                                                           WHERE rd.LinkNo = i.TransSlNo AND ISNULL(rd.DeleteStatus, 'N') = 'N'
-                                                            AND ISNULL(NULLIF(rd.ReturnType, ''), 'Unused') IN ('Unused', 'End Piece')) rr
+                                                            AND ISNULL(NULLIF(LTRIM(RTRIM(rd.ReturnType)), ''), 'Unused') = 'Unused') rr
                                            WHERE i.DeleteStatus = 'N' AND i.MaterialSource = 'C' AND i.PartNo = d.PartNo
                                              AND i.OAYear = m.OAYear AND i.OANo = m.OANo
                                              AND UPPER(LTRIM(RTRIM(i.HeatNo))) = UPPER(LTRIM(RTRIM(d.HeatNo)))) iss
@@ -681,11 +681,11 @@ namespace EMSAPI.Controllers
                              OUTER APPLY (SELECT SUM(i.Qty) - ISNULL(SUM(rr.q), 0) AS q
                                             FROM dbo.StoreIssueDtl i
                                             JOIN dbo.StoreIssueMst im ON im.MTransNo = i.MTransNo AND im.DeleteStatus = 'N'
-                                            -- re-usable bar returned on the line (Unused / End Piece) goes back to the heat
+                                            -- unused bar returned on the line goes back to the heat (SQL 78: end pieces and scrap do not)
                                             OUTER APPLY (SELECT SUM(rd.RTNQty) AS q FROM dbo.StoreReturnsDtl rd
                                                            JOIN dbo.StoreReturnsMst rm ON rm.MTransNo = rd.MTransNo AND rm.DeleteStatus = 'N'
                                                           WHERE rd.LinkNo = i.TransSlNo AND ISNULL(rd.DeleteStatus, 'N') = 'N'
-                                                            AND ISNULL(NULLIF(rd.ReturnType, ''), 'Unused') IN ('Unused', 'End Piece')) rr
+                                                            AND ISNULL(NULLIF(LTRIM(RTRIM(rd.ReturnType)), ''), 'Unused') = 'Unused') rr
                                            WHERE i.DeleteStatus = 'N' AND i.MaterialSource = 'C' AND i.PartNo = d.PartNo
                                              AND i.OAYear = o.OAYear AND i.OANo = o.OANo
                                              AND UPPER(LTRIM(RTRIM(i.HeatNo))) = UPPER(LTRIM(RTRIM(d.HeatNo)))) iss
@@ -730,11 +730,11 @@ namespace EMSAPI.Controllers
                      OUTER APPLY (SELECT SUM(i.Qty) - ISNULL(SUM(rr.q), 0) AS q
                                     FROM dbo.StoreIssueDtl i
                                     JOIN dbo.StoreIssueMst im ON im.MTransNo = i.MTransNo AND im.DeleteStatus = 'N'
-                                    -- re-usable bar returned on the line (Unused / End Piece) goes back to the heat
+                                    -- unused bar returned on the line goes back to the heat (SQL 78: end pieces and scrap do not)
                                     OUTER APPLY (SELECT SUM(rd.RTNQty) AS q FROM dbo.StoreReturnsDtl rd
                                                    JOIN dbo.StoreReturnsMst rm ON rm.MTransNo = rd.MTransNo AND rm.DeleteStatus = 'N'
                                                   WHERE rd.LinkNo = i.TransSlNo AND ISNULL(rd.DeleteStatus, 'N') = 'N'
-                                                    AND ISNULL(NULLIF(rd.ReturnType, ''), 'Unused') IN ('Unused', 'End Piece')) rr
+                                                    AND ISNULL(NULLIF(LTRIM(RTRIM(rd.ReturnType)), ''), 'Unused') = 'Unused') rr
                                    WHERE i.DeleteStatus = 'N' AND i.SubscID = d.SubscID AND i.PartNo = d.PartNo
                                      AND UPPER(LTRIM(RTRIM(i.HeatNo))) = UPPER(LTRIM(RTRIM(d.HeatNo)))) iss
                      WHERE d.SubscID = @SubscID AND d.DeleteStatus = 'N' AND d.PartNo = @PartNo
@@ -753,11 +753,11 @@ namespace EMSAPI.Controllers
                      OUTER APPLY (SELECT SUM(i.Qty) - ISNULL(SUM(rr.q), 0) AS q
                                     FROM dbo.StoreIssueDtl i
                                     JOIN dbo.StoreIssueMst im ON im.MTransNo = i.MTransNo AND im.DeleteStatus = 'N'
-                                    -- re-usable bar returned on the line (Unused / End Piece) goes back to the heat
+                                    -- unused bar returned on the line goes back to the heat (SQL 78: end pieces and scrap do not)
                                     OUTER APPLY (SELECT SUM(rd.RTNQty) AS q FROM dbo.StoreReturnsDtl rd
                                                    JOIN dbo.StoreReturnsMst rm ON rm.MTransNo = rd.MTransNo AND rm.DeleteStatus = 'N'
                                                   WHERE rd.LinkNo = i.TransSlNo AND ISNULL(rd.DeleteStatus, 'N') = 'N'
-                                                    AND ISNULL(NULLIF(rd.ReturnType, ''), 'Unused') IN ('Unused', 'End Piece')) rr
+                                                    AND ISNULL(NULLIF(LTRIM(RTRIM(rd.ReturnType)), ''), 'Unused') = 'Unused') rr
                                    WHERE i.DeleteStatus = 'N' AND i.SubscID = d.SubscID AND i.PartNo = d.PartNo
                                      AND UPPER(LTRIM(RTRIM(i.HeatNo))) = UPPER(LTRIM(RTRIM(d.HeatNo)))) iss
                      WHERE o.SubscID = @SubscID AND d.DeleteStatus = 'N' AND d.PartNo = @PartNo

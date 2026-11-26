@@ -215,13 +215,15 @@ namespace EMSAPI.Controllers
 
             // ── dies ─────────────────────────────────────────────────────
             var dies = await t.Time("dies", () => Rows(con, @"
-                SELECT d.MTransNo AS id, ISNULL(NULLIF(p.PartCode, ''), 'Die ' + CAST(d.MTransNo AS varchar(10))) AS dieNo,
+                SELECT d.MTransNo AS id,
+                       ISNULL(NULLIF(d.DieCode, ''), ISNULL(NULLIF(p.PartCode, ''), 'Die ' + CAST(d.MTransNo AS varchar(10)))) AS dieNo,
                        ISNULL(p.PartCode, '') AS partCode, ISNULL(p.PartName, '') AS partName,
                        ISNULL(d.DieStatus, 'Ready') AS status, ISNULL(d.MaxQty, 0) AS maxQty,
                        ISNULL(d.OpeningQty, 0) + ISNULL(u.q, 0) AS processed
                   FROM dbo.DieMst d
                   LEFT JOIN dbo.PartMaster p ON p.MTransNo = d.PartNo
-                  OUTER APPLY (SELECT SUM(e.Qty) AS q FROM dbo.JobCardEntry e WHERE e.DieNo = d.MTransNo AND e.DeleteStatus = 'N') u
+                  OUTER APPLY (SELECT SUM(e.Qty) AS q FROM dbo.JobCardEntry e WHERE e.DieNo = d.MTransNo AND e.DeleteStatus = 'N'
+                                  AND e.StepSlNo = dbo.FN_JobCardForgeStep(e.MTransNo)) u
                  WHERE d.SubscID = @SubscID AND ISNULL(d.DeleteStatus, 'N') = 'N'", S()));
             var health = dies.Select(d => new
             {

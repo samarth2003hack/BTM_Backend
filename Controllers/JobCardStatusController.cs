@@ -20,8 +20,11 @@ namespace EMSAPI.Controllers
     /// recomputed, never added twice:
     ///   - each entry's step belongs to the job card's route and its machine is
     ///     mapped to the step's operation;
-    ///   - a die must be of the job card's grade and of the route's die type, and
+    ///   - a die must be of the job card's part and grade (Die Type is a
+    ///     description only), is recorded on the forging step alone (SQL 77), and
     ///     its lifetime capacity (opening + every job card's use) is never exceeded;
+    ///   - a Completed job card is locked: only an ADMIN or MANAGER may change
+    ///     or clear its entries, with a reason that goes to the AuditLog;
     ///   - partial flow: a step's cumulative qty never exceeds the previous step's
     ///     (step 1 is capped by the job card qty);
     ///   - pieces already inspected must stay covered at the inspection step;
@@ -98,6 +101,10 @@ namespace EMSAPI.Controllers
                 if (jc == null) return NotFoundResult("Job card not found.");
                 if (r.SubscID > 0 && r.SubscID != I(jc, "SubscID")) return NotFoundResult("Job card not found.");
 
+                // ── A Completed job card is locked ────────────────────────
+                var lockErr = await CompletedLockError(r.MTransNo, S(jc, "JobCardNo"), userNo, r.EditReason, "Edit entries", I(jc, "SubscID"));
+                if (lockErr != null) return ConflictResult(lockErr);
+
                 var subscID = I(jc, "SubscID");
                 var jobNo = S(jc, "JobCardNo");
                 var jobQty = D(jc, "Qty");
@@ -131,17 +138,21 @@ namespace EMSAPI.Controllers
                       FROM dbo.MachineMst WHERE SubscID = @S AND DeleteStatus = 'N'",
                     Int("@S", subscID))).ToDictionary(m => I(m, "MTransNo"));
                 var dies = (await Query(@"
-                    SELECT d.MTransNo, d.GradeNo, LTRIM(RTRIM(ISNULL(d.DieType, ''))) AS DieType,
+                    SELECT d.MTransNo, d.PartNo, d.GradeNo, LTRIM(RTRIM(ISNULL(d.DieType, ''))) AS DieType,
                            ISNULL(d.MaxQty, 0) AS MaxQty, ISNULL(d.OpeningQty, 0) AS OpeningQty,
-                           ISNULL(p.PartCode, CONCAT('Die ', d.MTransNo)) AS DieCode,
+                           ISNULL(NULLIF(d.DieCode, ''), ISNULL(p.PartCode, CONCAT('Die ', d.MTransNo))) AS DieCode,
                            ISNULL((SELECT SUM(e.Qty) FROM dbo.JobCardEntry e
-                                    WHERE e.DieNo = d.MTransNo AND e.DeleteStatus = 'N' AND e.MTransNo <> @M), 0) AS OtherUse,
+                                    WHERE e.DieNo = d.MTransNo AND e.DeleteStatus = 'N' AND e.MTransNo <> @M
+                                      AND e.StepSlNo = dbo.FN_JobCardForgeStep(e.MTransNo)), 0) AS OtherUse,
                            (SELECT TOP (1) g.Grade FROM dbo.MaterialGrade g
                              WHERE g.PartNo = d.PartNo AND g.GradeNo = d.GradeNo AND g.DeleteStatus = 'N') AS Grade
                       FROM dbo.DieMst d
                       LEFT JOIN dbo.PartMaster p ON p.MTransNo = d.PartNo
                      WHERE d.SubscID = @S AND d.DeleteStatus = 'N'",
                     Int("@S", subscID), Int("@M", r.MTransNo))).ToDictionary(d => I(d, "MTransNo"));
+
+                // The step the job card forges on — the only step a die is recorded on.
+                var forgeSlNo = I(await QueryOne("SELECT ISNULL(dbo.FN_JobCardForgeStep(@M), 0) AS s", Int("@M", r.MTransNo)), "s");
 
                 // ── Each entry ────────────────────────────────────────────
                 var rows = new List<object>();
@@ -162,12 +173,16 @@ namespace EMSAPI.Controllers
                     if (e.DieNo > 0)
                     {
                         if (!dies.TryGetValue(e.DieNo, out var die)) return ConflictResult($"{label}: the die no longer exists.");
+                        // A die forges one part: it must be this job card's part (Die Type no longer decides).
+                        if (I(die, "PartNo") != I(jc, "PartNo"))
+                            return ConflictResult($"{label}: {S(die, "DieCode")} is a die for another part, not {S(jc, "PartCode")}.");
                         if (I(jc, "GradeNo") != 0 && I(die, "GradeNo") != 0 && I(die, "GradeNo") != I(jc, "GradeNo"))
                             return ConflictResult(
                                 $"{label}: {S(die, "DieCode")} is for grade {S(die, "Grade")}, the job card is grade {S(jc, "Grade")}.");
-                        if (S(jc, "DieType") != "" &&
-                            !string.Equals(S(die, "DieType"), S(jc, "DieType"), StringComparison.OrdinalIgnoreCase))
-                            return ConflictResult($"{label}: {S(die, "DieCode")} is not a {S(jc, "DieType")}.");
+                        // Die Type is a description only (SQL 77): a die of another type label is allowed.
+                        // A die is worn only by forging, so it is recorded on the forging step alone.
+                        if (forgeSlNo > 0 && e.StepSlNo != forgeSlNo)
+                            return ConflictResult($"{label}: a die can be recorded only on the forging step (step {forgeSlNo}).");
                     }
 
                     if (e.EntryDate == null) return ConflictResult($"{label}: Operation Date is required.");
@@ -259,9 +274,11 @@ namespace EMSAPI.Controllers
             if (string.IsNullOrWhiteSpace(mReason)) return BadRequestResult("Enter the reason for clearing the entries.");
             try
             {
-                var jc = await QueryOne("SELECT SubscID FROM dbo.JobCardMst WHERE MTransNo = @M AND DeleteStatus = 'N'",
+                var jc = await QueryOne("SELECT SubscID, JobCardNo FROM dbo.JobCardMst WHERE MTransNo = @M AND DeleteStatus = 'N'",
                     Int("@M", MTransNo));
                 if (jc == null) return NotFoundResult("Job card not found.");
+                var lockErr = await CompletedLockError(MTransNo, S(jc, "JobCardNo"), UserNo, mReason, "Clear entries", I(jc, "SubscID"));
+                if (lockErr != null) return ConflictResult(lockErr);
 
                 var result = await db.CallJobCardEntrySaveSP(
                     MTransNo, true, "[]", Trunc(mReason, 250), UserNo, I(jc, "SubscID"));
@@ -269,6 +286,31 @@ namespace EMSAPI.Controllers
                 return OkResult("OK", "Production entries cleared");
             }
             catch (Exception ex) { return ErrorResult(ex); }
+        }
+
+        /// <summary>
+        /// A Completed job card (every piece through its last step — the
+        /// VW_JobCardSummary rule) is locked: its output history feeds
+        /// inspection, FG stock, die life and the plan. Only an ADMIN or a
+        /// MANAGER may change it, and only with a reason, which is written to
+        /// the AuditLog. Returns the refusal message, or null when allowed.
+        /// </summary>
+        private async Task<string?> CompletedLockError(int jobCard, string jobNo, int userNo, string? reason, string action, int subscID)
+        {
+            var st = await QueryOne("SELECT JobStatus FROM dbo.VW_JobCardSummary WHERE JobCardTransNo = @M", Int("@M", jobCard));
+            if (st == null || S(st, "JobStatus") != "Completed") return null;
+            var type = ((await db.UserMaster.AsNoTracking().Where(u => u.MTransNo == userNo)
+                .Select(u => u.UserType).FirstOrDefaultAsync()) ?? "").Trim().ToUpperInvariant();
+            if (type != "ADMIN" && type != "MANAGER")
+                return $"{jobNo} is Completed, so its production entries are locked. Only an Admin or a Manager can change them.";
+            reason = (reason ?? "").Trim();
+            if (reason.Length < 5)
+                return $"{jobNo} is Completed. Give a reason (at least 5 letters) for changing its production entries.";
+            await db.Database.ExecuteSqlRawAsync(@"
+                INSERT INTO dbo.AuditLog (TableName, ModuleName, RecordID, ActionType, ChangeCount, Reason, ChangedBy, ChangedOn, SubscID)
+                VALUES ('JobCardEntry', 'Job Card Status', {0}, 'Update', 0, {1}, {2}, SYSDATETIME(), {3})",
+                jobCard.ToString(CultureInfo.InvariantCulture), Trunc($"Reopen - {action} on Completed {jobNo}: {reason}", 250), userNo, subscID);
+            return null;
         }
 
         /// <summary>"HH:MM" → minutes since midnight, or -1.</summary>

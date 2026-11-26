@@ -112,6 +112,7 @@ namespace EMSAPI.Models
                 new SqlParameter("@UserNo",         SqlDbType.Int)          { Value = dto.UserNo },
                 new SqlParameter("@DeleteReason",   SqlDbType.VarChar, 250) { Value = JcValue(dto.DeleteReason) },
                 new SqlParameter("@SubscID",        SqlDbType.Int)          { Value = dto.SubscID },
+                new SqlParameter("@InspType",       SqlDbType.VarChar,  10) { Value = dto.InspType == "Rework" ? "Rework" : "Normal" },
             };
 
             await Database.ExecuteSqlRawAsync("""
@@ -120,7 +121,8 @@ namespace EMSAPI.Models
                     @InspDate = @InspDate, @JobCardTransNo = @JobCardTransNo, @InspectedBy = @InspectedBy,
                     @InspectedQty = @InspectedQty, @OKQty = @OKQty, @ReworkQty = @ReworkQty,
                     @RejectedQty = @RejectedQty, @Remarks = @Remarks, @SystemIP = @SystemIP,
-                    @UserNo = @UserNo, @DeleteReason = @DeleteReason, @SubscID = @SubscID
+                    @UserNo = @UserNo, @DeleteReason = @DeleteReason, @SubscID = @SubscID,
+                    @InspType = @InspType
                 """, p);
 
             return JcResult(id, msg);

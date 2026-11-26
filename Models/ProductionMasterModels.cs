@@ -43,6 +43,7 @@ namespace EMSAPI.Models
         public decimal MaxQty { get; set; }
         public decimal OpeningQty { get; set; }
         public string? DieStatus { get; set; }       // Ready / In Repair / Scrapped (SQL 58); null = keep
+        public string? DieCode { get; set; }         // SQL 77 — the die's own number (e.g. D-114-A)
         public string? Remarks { get; set; }
         public string? LockStatus { get; set; }
         public int CreatedBy { get; set; }

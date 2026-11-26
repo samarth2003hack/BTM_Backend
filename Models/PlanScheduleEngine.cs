@@ -24,6 +24,9 @@ namespace EMSAPI.Models
     ///   9. ALTERNATE jobs are standby and take no dates.
     ///  10. Weeks are Monday–Sunday, cut to the month, numbered W1, W2 …
     ///  12. Forge-by = delivery − post-forging days − 1 dispatch day.
+    ///  14. A hammer's down days (breakdowns — SQL-free, fed by the caller as
+    ///      DownDates) are not working days for that hammer: its jobs skip
+    ///      them, and its capacity is the month's working days less them.
     /// </summary>
     public static class PlanScheduleEngine
     {
@@ -58,7 +61,15 @@ namespace EMSAPI.Models
             public List<string> Dates { get; } = new();
             public List<Week> Weeks { get; } = new();
             public Dictionary<string, double> Rates { get; } = new();
+            /// <summary>Rule 14 — machineNo → ISO dates the hammer is down (breakdown).</summary>
+            public Dictionary<string, HashSet<string>> DownDates { get; } = new();
             public bool HasMachines { get; set; }
+
+            /// <summary>The working dates of one hammer: the month's, less its down days.</summary>
+            public List<string> DatesOf(int machineNo) =>
+                DownDates.TryGetValue(machineNo.ToString(CultureInfo.InvariantCulture), out var down) && down.Count > 0
+                    ? Dates.Where(d => !down.Contains(d)).ToList()
+                    : Dates;
             public int WorkingDays => Dates.Count;
             public double AvailableHours => Math.Round(Dates.Count * NetHours, 2);
 
@@ -226,7 +237,11 @@ namespace EMSAPI.Models
 
         // ── Build (rules 3–9) ───────────────────────────────────────────
 
-        private sealed class LaneState { public double Rate; public double Cursor; public double WorkDays; public double IdleDays; }
+        private sealed class LaneState
+        {
+            public double Rate; public double Cursor; public double WorkDays; public double IdleDays;
+            public List<string> Dates = new();   // rule 14 — this hammer's working dates
+        }
 
         public static Built Build(IList<Job> jobs, CalendarInfo? info)
         {
@@ -243,9 +258,10 @@ namespace EMSAPI.Models
 
                 if (!lanes.TryGetValue(job.MachineNo, out var lane))
                 {
-                    lane = new LaneState { Rate = info!.RateOf(job.MachineNo) };
+                    lane = new LaneState { Rate = info!.RateOf(job.MachineNo), Dates = info.DatesOf(job.MachineNo) };
                     lanes[job.MachineNo] = lane;
                 }
+                var laneDates = lane.Dates;
                 var lineQtys = job.LineQtys.ToArray();
                 var totalQty = lineQtys.Sum();
                 if (!(lane.Rate > 0))
@@ -261,8 +277,8 @@ namespace EMSAPI.Models
                 res.CalDays = Round(calDays, 4);
                 if (!string.IsNullOrEmpty(job.FixedStart))
                 {
-                    var idx = dates.FindIndex(d => string.CompareOrdinal(d, job.FixedStart) >= 0);
-                    var pos = idx < 0 ? dates.Count : idx;
+                    var idx = laneDates.FindIndex(d => string.CompareOrdinal(d, job.FixedStart) >= 0);
+                    var pos = idx < 0 ? laneDates.Count : idx;
                     if (pos > lane.Cursor + Eps)
                     {
                         res.IdleBefore = Round(pos - lane.Cursor, 2);
@@ -293,7 +309,7 @@ namespace EMSAPI.Models
                 for (var k = 0; k < slots.Count; k++)
                 {
                     var s = slots[k];
-                    var date = s.Pos < dates.Count ? dates[s.Pos] : "";
+                    var date = s.Pos < laneDates.Count ? laneDates[s.Pos] : "";
                     if (date == "") res.Overflow = true;
                     var lines = FillLines(qtys[k], remaining);
                     res.Days.Add(new JobDay { Date = date, Fraction = Round(s.Fraction, 4), Qty = qtys[k], Lines = lines });
@@ -306,12 +322,12 @@ namespace EMSAPI.Models
                 res.EndDate = dated.Count > 0 ? dated[^1].Date : "";
             }
 
-            var cap = dates.Count;
             double used = 0, idle = 0;
             var peak = 0;
             foreach (var kv in lanes)
             {
                 var l = kv.Value;
+                var cap = l.Dates.Count;   // rule 14 — less the hammer's down days
                 var usedDays = Round(l.Cursor, 2);
                 var loadPct = cap > 0 ? (int)Math.Round(usedDays / cap * 100, MidpointRounding.AwayFromZero) : 0;
                 built.Lanes[kv.Key] = new Lane { Rate = l.Rate, UsedDays = usedDays, WorkDays = Round(l.WorkDays, 2),

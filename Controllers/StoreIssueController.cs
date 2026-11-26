@@ -37,6 +37,42 @@ namespace EMSAPI.Controllers
 
         protected static string NormGrade(string? grade) => (grade ?? "").Trim();
 
+        // ── Bins (SQL 80) ───────────────────────────────────────────────
+        // A bin is a Store + Location of the StoreLocation master — the same
+        // bins GRN Store Allocation puts goods in. Balances come from
+        // dbo.VW_StockByLocation.
+
+        /// <summary>True when the bin is a live row of the StoreLocation master.</summary>
+        protected async Task<bool> BinExists(string store, string location, int subscID) =>
+            (await db.PmQueryRowsAsync(@"
+                SELECT TOP (1) 1 AS x FROM dbo.StoreLocation
+                 WHERE SubscID = @S AND DeleteStatus = 'N'
+                   AND LTRIM(RTRIM(Store)) = @St AND LTRIM(RTRIM(ISNULL(Location, ''))) = @Lo",
+                new SqlParameter("@S", subscID), new SqlParameter("@St", store), new SqlParameter("@Lo", location))).Count > 0;
+
+        /// <summary>Own stock of a part + grade in one bin ('' / '' = "No bin"), and in all named bins.</summary>
+        protected async Task<(decimal InBin, decimal InAllBins)> BinBalanceOf(int partNo, string? grade, string store, string location, int subscID)
+        {
+            var rows = await db.PmQueryRowsAsync(@"
+                SELECT ISNULL(SUM(CASE WHEN Store = @St AND Location = @Lo THEN BalanceQty END), 0) AS inBin,
+                       ISNULL(SUM(CASE WHEN Store <> '' AND BalanceQty > 0 THEN BalanceQty END), 0) AS inAll
+                  FROM dbo.VW_StockByLocation
+                 WHERE SubscID = @S AND PartNo = @P AND Grade = @G",
+                new SqlParameter("@S", subscID), new SqlParameter("@P", partNo), new SqlParameter("@G", NormGrade(grade)),
+                new SqlParameter("@St", store), new SqlParameter("@Lo", location));
+            var r = rows.FirstOrDefault();
+            return (Convert.ToDecimal(r?["inBin"] ?? 0m), Convert.ToDecimal(r?["inAll"] ?? 0m));
+        }
+
+        /// <summary>Writes the bin of an issue / return line (one-row update of the row just saved).</summary>
+        protected Task SetLineBin(string table, int transSlNo, string store, string location) =>
+            db.Database.ExecuteSqlRawAsync(
+                "UPDATE dbo." + (table == "StoreReturnsDtl" ? "StoreReturnsDtl" : "StoreIssueDtl") +
+                " SET Store = {0}, Location = {1} WHERE TransSlNo = {2}",
+                (object?)NullIfBlank(store) ?? DBNull.Value, (object?)NullIfBlank(location) ?? DBNull.Value, transSlNo);
+
+        private static string? NullIfBlank(string s) => string.IsNullOrWhiteSpace(s) ? null : s;
+
         /// <summary>
         /// Stock in hand of one part in one grade, optionally leaving out every
         /// line of one store issue (the one being edited).
@@ -105,7 +141,7 @@ namespace EMSAPI.Controllers
         /// <summary>
         /// What is left of one heat of a part: the heat's quantity less what
         /// live issue lines took from it, plus what came back from those lines
-        /// as re-usable bar (Issue Return types Unused and End Piece; Scrap does
+        /// as unused bar (Issue Return type Unused; SQL 78: End Piece and Scrap do
         /// not go back to the heat). Own bar ('O') counts approved Heat No
         /// entries and approved own opening stock; customer bar ('C') counts
         /// what the customer sent on that OA (inward + customer opening stock).
@@ -153,7 +189,7 @@ namespace EMSAPI.Controllers
                     ISNULL((SELECT SUM(rd.RTNQty) FROM dbo.StoreReturnsDtl rd
                               JOIN dbo.StoreReturnsMst rm ON rm.MTransNo = rd.MTransNo AND rm.DeleteStatus = 'N'
                              WHERE rd.LinkNo = @Ex AND @Ex > 0 AND ISNULL(rd.DeleteStatus, 'N') = 'N'
-                               AND ISNULL(NULLIF(rd.ReturnType, ''), 'Unused') IN ('Unused', 'End Piece')), 0) AS ownReturned",
+                               AND ISNULL(NULLIF(LTRIM(RTRIM(rd.ReturnType)), ''), 'Unused') = 'Unused'), 0) AS ownReturned",
                 new SqlParameter("@Src", source), new SqlParameter("@H", (heatNo ?? "").Trim().ToUpperInvariant()),
                 new SqlParameter("@S", subscID), new SqlParameter("@P", partNo), new SqlParameter("@G", NormGrade(grade)),
                 new SqlParameter("@OY", oaYearN ?? 0), new SqlParameter("@ON", oaNoN ?? 0), new SqlParameter("@Ex", excludeTransSlNo));
@@ -168,7 +204,7 @@ namespace EMSAPI.Controllers
                   FROM dbo.StoreReturnsDtl rd
                   JOIN dbo.StoreReturnsMst rm ON rm.MTransNo = rd.MTransNo AND rm.DeleteStatus = 'N'
                  WHERE rd.LinkNo = i.TransSlNo AND ISNULL(rd.DeleteStatus, 'N') = 'N'
-                   AND ISNULL(NULLIF(rd.ReturnType, ''), 'Unused') IN ('Unused', 'End Piece')";
+                   AND ISNULL(NULLIF(LTRIM(RTRIM(rd.ReturnType)), ''), 'Unused') = 'Unused'";
 
         protected static string Label(string? code, string? name) =>
             !string.IsNullOrWhiteSpace(code) ? code.Trim() : (name ?? "").Trim();
@@ -336,6 +372,7 @@ namespace EMSAPI.Controllers
                         MrnQty = l.Qty, BalQty = bal, IssueQty = ownQty,
                         ReturnedQty = o == null ? 0 : returned.FirstOrDefault(r => r.LinkNo == o.TransSlNo)?.ReturnedQty ?? 0,
                         HeatNo = o?.HeatNo ?? "",
+                        Store = o?.Store ?? "", Location = o?.Location ?? "",   // SQL 80
                         l.Unit,
                         ItemRemarks = o?.ItemRemarks ?? ""
                     });
@@ -352,6 +389,7 @@ namespace EMSAPI.Controllers
                         MrnQty = o.MRNQty, BalQty = o.Qty, IssueQty = o.Qty,
                         ReturnedQty = returned.FirstOrDefault(r => r.LinkNo == o.TransSlNo)?.ReturnedQty ?? 0,
                         HeatNo = o.HeatNo ?? "",
+                        Store = o.Store ?? "", Location = o.Location ?? "",     // SQL 80
                         o.Unit, ItemRemarks = o.ItemRemarks ?? ""
                     });
                 }
@@ -650,6 +688,30 @@ namespace EMSAPI.Controllers
                             (src.Grade.Length > 0 ? $" (grade {src.Grade})" : "") + " is in stock.");
                 }
 
+                // Bin (SQL 80): own bar is taken from a bin. Once the part +
+                // grade is kept in bins, the bin is required and the line may
+                // not take more than that bin holds.
+                var store = Trunc(dto.Store, 50).Trim();
+                var location = store.Length > 0 ? Trunc(dto.Location, 50).Trim() : "";
+                if (source != "C")
+                {
+                    var oldStore = (cur?.Store ?? "").Trim();
+                    var oldLoc = (cur?.Location ?? "").Trim();
+                    if (store.Length > 0 && !await BinExists(store, location, h.SubscID))
+                        return ConflictResult($"{label}: bin {store}{(location.Length > 0 ? " / " + location : "")} is not on the Store Location master.");
+                    var (inBin, inAll) = await BinBalanceOf(src.PartNo, src.Grade, store, location, h.SubscID);
+                    if (store.Length == 0 && inAll > 0)
+                        return ConflictResult($"{label} is kept in store bins ({Qty(inAll)} {src.Unit}). Pick the bin (Store / Location) the bar is taken from.");
+                    if (store.Length > 0)
+                    {
+                        var binQty = inBin + (oldStore == store && oldLoc == location ? ownOld : 0);
+                        if (dto.Qty > binQty)
+                            return ConflictResult($"Only {Qty(Math.Max(0, binQty))} {src.Unit} of {label}" +
+                                (src.Grade.Length > 0 ? $" (grade {src.Grade})" : "") +
+                                $" is in bin {store}{(location.Length > 0 ? " / " + location : "")}.");
+                    }
+                }
+
                 // Heat balance: a line that names a heat cannot take more than
                 // is left of that heat (an unknown heat is refused by the SP).
                 var heat = (dto.HeatNo ?? "").Trim().ToUpperInvariant();
@@ -704,6 +766,7 @@ namespace EMSAPI.Controllers
                 var plan = await db.CallStoreIssueDtlPlanFieldsSP(id,
                     Trunc(dto.HeatNo, 50).ToUpperInvariant(), dto.UserNo, h.SubscID, source);
                 if (plan.ID == 0) return ConflictResult(label + ": " + plan.Message);
+                await SetLineBin("StoreIssueDtl", id, source == "C" ? "" : store, source == "C" ? "" : location);
 
                 await tx.CommitAsync();
                 return OkResult(new { id, TransSlNo = id }, "Line saved.");

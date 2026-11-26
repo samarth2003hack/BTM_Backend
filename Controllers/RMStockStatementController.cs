@@ -9,8 +9,9 @@ namespace EMSAPI.Controllers
     ///   opening  = in − out before FromDate
     ///   receipt  = GRN in + store returns in the range
     ///   issued   = store issues (+ sales) in the range
-    ///   endPiece = returns of type "End Piece" in the range (part of receipt;
-    ///              shown so re-usable offcut is visible)
+    ///   endPiece = end pieces returned in the range (Issue Return type "End Piece",
+    ///              dbo.VW_OffcutStock). SQL 78: shown apart, NOT part of receipt or
+    ///              closing — an end piece is not bar.
     ///   closing  = opening + receipt − issued
     ///   rate     = weighted GRN rate of the part + grade; value = closing × rate
     /// plus what live, approved plans need of each bar in the 7 days from today
@@ -38,14 +39,16 @@ namespace EMSAPI.Controllers
                            SUM(CASE WHEN s.DocDate < @From OR s.TxnType = 'OPENING' THEN ISNULL(s.InQty, 0) - ISNULL(s.OutQty, 0) ELSE 0 END) AS opening,
                            SUM(CASE WHEN s.DocDate BETWEEN @From AND @To AND s.TxnType IN ('GRN', 'RETURN', 'PRODUCTION') THEN ISNULL(s.InQty, 0) ELSE 0 END) AS receipt,
                            SUM(CASE WHEN s.DocDate BETWEEN @From AND @To AND s.TxnType <> 'OPENING' THEN ISNULL(s.OutQty, 0) ELSE 0 END) AS issued,
-                           SUM(CASE WHEN s.DocDate BETWEEN @From AND @To AND s.TxnType = 'RETURN' AND rt.ReturnType = 'End Piece'
-                                    THEN ISNULL(s.InQty, 0) ELSE 0 END) AS endPiece,
+                           MAX(ISNULL(ep.q, 0)) AS endPiece,
                            STRING_AGG(CASE WHEN s.DocDate BETWEEN @From AND @To AND s.TxnType = 'GRN'
                                            THEN CONCAT(RTRIM(s.DocSeries), '/', s.DocNo) END, ', ') AS grnRefs
                       FROM dbo.VW_StoreStock s
                       LEFT JOIN dbo.PartMaster p ON p.MTransNo = s.PartNo
-                      OUTER APPLY (SELECT TOP (1) r.ReturnType FROM dbo.StoreReturnsDtl r
-                                    WHERE s.TxnType = 'RETURN' AND r.TransSlNo = s.RefTransSlNo) rt
+                      -- SQL 78: end pieces live in VW_OffcutStock, apart from bar stock.
+                      OUTER APPLY (SELECT SUM(o.Qty) AS q FROM dbo.VW_OffcutStock o
+                                    WHERE o.SubscID = s.SubscID AND o.PartNo = s.PartNo AND o.Kind = 'End Piece'
+                                      AND LTRIM(RTRIM(ISNULL(o.Grade, ''))) = LTRIM(RTRIM(ISNULL(s.Grade, '')))
+                                      AND o.DocDate BETWEEN @From AND @To) ep
                      WHERE s.SubscID = @SubscID AND s.DocDate <= @To
                      GROUP BY s.PartNo, LTRIM(RTRIM(ISNULL(s.Grade, ''))), p.PartCode, p.PartName",
                     Int("@SubscID", SubscID), Str("@From", from, 10), Str("@To", to, 10));

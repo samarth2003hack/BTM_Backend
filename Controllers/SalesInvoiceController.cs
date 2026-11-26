@@ -133,6 +133,29 @@ namespace EMSAPI.Controllers
         /// FreightRate is per unit (OA FreightAmt / Qty) and PnFP is the OA
         /// line's P&amp;F figure, both exactly as the legacy GetOADtl sent them.
         /// </summary>
+        /// <summary>
+        /// SQL 81 — is the supply on this OA inter-state (IGST) or intra-state
+        /// (CGST + SGST)? Same rule the server applies when it stores the tax
+        /// (dbo.FN_IsInterStateSupply), so the page shows what will be saved.
+        ///   GET Source/SupplyType?oaTransNo=&invType=   → { interState }
+        /// </summary>
+        [HttpGet("Source/SupplyType")]
+        public async Task<IActionResult> SourceSupplyType([FromQuery] int oaTransNo, [FromQuery] string? invType)
+        {
+            if (oaTransNo <= 0) return BadRequestResult("Invalid Order Acceptance.");
+            try
+            {
+                var rows = await db.PmQueryRowsAsync(@"
+                    SELECT CAST(dbo.FN_IsInterStateSupply(GSTIN, StateName, @Inv, TaxType) AS INT) AS inter
+                      FROM dbo.OAMst WHERE MTransNo = @M",
+                    new Microsoft.Data.SqlClient.SqlParameter("@M", oaTransNo),
+                    new Microsoft.Data.SqlClient.SqlParameter("@Inv", (invType ?? "").Trim()));
+                if (rows.Count == 0) return NotFoundResult("Order Acceptance not found.");
+                return OkResult(new { interState = Convert.ToInt32(rows[0]["inter"]) == 1 });
+            }
+            catch (Exception ex) { return ErrorResult(ex); }
+        }
+
         [HttpGet("Source/OAItems/{oaTransNo}/{subscID}")]
         public async Task<IActionResult> SourceOAItems(int oaTransNo, int subscID, [FromQuery] int mTransNo = 0)
         {
@@ -278,6 +301,7 @@ namespace EMSAPI.Controllers
                 dto.SystemIP = ClientIp;
                 var result = await db.CallSTxnMstSP(dto);
                 if (result.ID == 0) return ConflictResult(result.Message);
+                await Recalc(result.ID);   // SQL 81 — the server's tax, not the browser's
                 return OkResult(new { ID = result.ID }, result.Message);
             }
             catch (Exception ex) { return ErrorResult(ex); }
@@ -521,6 +545,7 @@ namespace EMSAPI.Controllers
                 dto.SystemIP = ClientIp;
                 var result = await db.CallSTxnDtlSP(dto);
                 if (result.ID == 0) return ConflictResult(result.Message);
+                await Recalc(dto.MTransNo);   // SQL 81
                 return OkResult(new { ID = result.ID }, result.Message);
             }
             catch (Exception ex) { return ErrorResult(ex); }
@@ -550,6 +575,7 @@ namespace EMSAPI.Controllers
                     Status       = "Delete"
                 });
                 if (result.ID == 0) return ConflictResult(result.Message);
+                await Recalc(mTransNo);   // SQL 81
                 return OkResult(new { ID = result.ID }, result.Message);
             }
             catch (Exception ex) { return ErrorResult(ex); }
@@ -577,10 +603,20 @@ namespace EMSAPI.Controllers
                     Status       = "DeleteAll"
                 });
                 if (result.ID == 0) return ConflictResult(result.Message);
+                await Recalc(mTransNo);   // SQL 81
                 return OkResult(new { ID = result.ID }, result.Message);
             }
             catch (Exception ex) { return ErrorResult(ex); }
         }
+
+        /// <summary>
+        /// SQL 81 — recompute the invoice's line values, GST (IGST when the
+        /// customer's state differs from the company's, or Export / SEZ; else
+        /// CGST + SGST) and header totals from the stored lines, so the stored
+        /// tax never depends on what the browser sent.
+        /// </summary>
+        private Task Recalc(int mTransNo) =>
+            mTransNo > 0 ? db.Database.ExecuteSqlRawAsync("EXEC dbo.SP_STxnRecalc @MTransNo = {0}", mTransNo) : Task.CompletedTask;
 
         [HttpGet("Dtl/GetList/{mTransNo}/{subscID}")]
         public async Task<IActionResult> DtlGetList(int mTransNo, int subscID)

@@ -67,6 +67,8 @@ namespace EMSAPI.Models
         public string? ItemRemarks { get; set; }
         public string? DCOpration { get; set; }
         public string? HeatNo { get; set; }          // SQL 58 — an approved heat of the part
+        public string? Store { get; set; }           // SQL 80 — bin the bar is taken from
+        public string? Location { get; set; }
         public decimal MRNQty { get; set; }
         public decimal Qty { get; set; }
         public string? Unit { get; set; }
@@ -122,6 +124,8 @@ namespace EMSAPI.Models
         public decimal IssueQty { get; set; }
         public decimal RTNQty { get; set; }
         public string? ReturnType { get; set; }      // SQL 58 — Unused / End Piece / Scrap
+        public string? Store { get; set; }           // SQL 80 — bin the bar went back to
+        public string? Location { get; set; }
         public string? Unit { get; set; }
         public int CreatedBy { get; set; }
         public DateTime CreatedOn { get; set; }
@@ -254,6 +258,8 @@ namespace EMSAPI.Models
         public int LinkNo { get; set; }
         public string? DcOperation { get; set; }
         public string? HeatNo { get; set; }          // SQL 58; blank = none
+        public string? Store { get; set; }           // SQL 80 — the bin the bar is taken from
+        public string? Location { get; set; }
         public int UserNo { get; set; }
         public int SubscID { get; set; }
     }
@@ -281,6 +287,8 @@ namespace EMSAPI.Models
         public string? ItemRemarks { get; set; }
         public int LinkNo { get; set; }
         public string? ReturnType { get; set; }      // SQL 58; null = keep (new line: Unused)
+        public string? Store { get; set; }           // SQL 80 — the bin it goes back to; blank = the issue line's bin
+        public string? Location { get; set; }
         public int UserNo { get; set; }
         public int SubscID { get; set; }
     }

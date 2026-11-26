@@ -4932,7 +4932,8 @@ namespace EMSAPI.Models
         new SqlParameter("@DeleteReason", SqlDbType.VarChar, 250) { Value = (object?)dto.DeleteReason                             ?? DBNull.Value },
         new SqlParameter("@SubscID",      SqlDbType.Int)      { Value = (object?)dto.SubscID                                      ?? DBNull.Value },
         new SqlParameter("@Status",       dto.Status),
-        msg
+        msg,
+        new SqlParameter("@DieCode",      SqlDbType.VarChar, 30) { Value = (object?)dto.DieCode?.Trim()                         ?? DBNull.Value },
     };
 
             await Database.ExecuteSqlRawAsync("""
@@ -4941,7 +4942,7 @@ namespace EMSAPI.Models
             @PartNo, @GradeNo, @DieType,
             @MaxQty, @OpeningQty, @Remarks, @LockStatus,
             @CreatedBy, @CreatedOn, @ModifiedBy, @ModifiedOn,
-            @DeleteReason, @SubscID, @Status, @Message OUTPUT
+            @DeleteReason, @SubscID, @Status, @Message OUTPUT, @DieCode = @DieCode
         """, p);
 
             return (id.Value == DBNull.Value ? 0 : Convert.ToInt32(id.Value),

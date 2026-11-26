@@ -284,6 +284,43 @@ namespace EMSAPI.Controllers
             catch (Exception ex) { return ErrorResult(ex); }
         }
 
+        /// <summary>
+        /// SQL 80 — stock per bin (Store + Location) from dbo.VW_StockByLocation.
+        /// PartNo / Grade narrow it (the Store Issue bin picker passes both);
+        /// ShowZero=false hides empty bins. Rows with Store '' are movements
+        /// that carry no bin ("No bin": older lines, production, sales).
+        ///   GET ByLocation?PartNo=&Grade=&Store=&ShowZero=&SubscID=
+        /// </summary>
+        [HttpGet("ByLocation")]
+        public async Task<IActionResult> ByLocation([FromQuery] int PartNo, [FromQuery] string? Grade, [FromQuery] string? Store,
+            [FromQuery] bool ShowZero, [FromQuery] int SubscID)
+        {
+            if (SubscID <= 0) return BadRequestResult("Invalid Subscription.");
+            try
+            {
+                var rows = await db.PmQueryRowsAsync(@"
+                    SELECT b.PartNo AS partNo, ISNULL(p.PartCode, '') AS partCode, ISNULL(p.PartName, '') AS partName,
+                           b.Grade AS grade, b.Store AS store, b.Location AS location,
+                           CASE WHEN b.Store = '' THEN 'No bin'
+                                ELSE CONCAT(b.Store, CASE WHEN b.Location = '' THEN '' ELSE ' / ' + b.Location END) END AS bin,
+                           b.BalanceQty AS balanceQty, ISNULL(p.PrimaryUnit, '') AS unit,
+                           CONVERT(char(10), b.LastMoveDate, 23) AS lastMoveDate
+                      FROM dbo.VW_StockByLocation b
+                      LEFT JOIN dbo.PartMaster p ON p.MTransNo = b.PartNo
+                     WHERE b.SubscID = @S
+                       AND (@P = 0 OR b.PartNo = @P)
+                       AND (@G = '' OR b.Grade = @G)
+                       AND (@St = '' OR b.Store = @St)
+                       AND (@Z = 1 OR b.BalanceQty <> 0)
+                     ORDER BY p.PartCode, b.Grade, CASE WHEN b.Store = '' THEN 1 ELSE 0 END, b.Store, b.Location",
+                    new SqlParameter("@S", SubscID), new SqlParameter("@P", PartNo),
+                    new SqlParameter("@G", (Grade ?? "").Trim()), new SqlParameter("@St", (Store ?? "").Trim()),
+                    new SqlParameter("@Z", ShowZero ? 1 : 0));
+                return OkResult(rows, rows.Count > 0 ? "Data found." : "No records found.");
+            }
+            catch (Exception ex) { return ErrorResult(ex); }
+        }
+
         [HttpGet("HeatWise")]
         public async Task<IActionResult> HeatWise([FromQuery] string? AsOn, [FromQuery] int PartNo, [FromQuery] string? Grade,
             [FromQuery] bool ShowZero, [FromQuery] int SubscID)

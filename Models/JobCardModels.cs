@@ -66,6 +66,8 @@ namespace EMSAPI.Models
         public List<JobCardEntryInput>? Entries { get; set; }
         public int UserNo { get; set; }
         public int SubscID { get; set; }
+        /// <summary>Why a Completed job card's entries are being changed (ADMIN / MANAGER only).</summary>
+        public string? EditReason { get; set; }
     }
 
     /// <summary>POST api/JobCardInspection/SaveData — Status 'Insert' | 'Update'.</summary>
@@ -81,6 +83,7 @@ namespace EMSAPI.Models
         public decimal ReworkQty { get; set; }
         public decimal RejectedQty { get; set; }
         public string? RejectionReason { get; set; }   // Other Master 'Rejection Reason' (SQL 58)
+        public string? InspType { get; set; }          // SQL 79: 'Normal' | 'Rework'; kept on Update
         public string? Remarks { get; set; }
         public int CreatedBy { get; set; }
         public int SubscID { get; set; }
@@ -133,5 +136,7 @@ namespace EMSAPI.Models
         public int UserNo { get; set; }
         public string? DeleteReason { get; set; }
         public int SubscID { get; set; }
+        /// <summary>SQL 79: 'Normal' (first pass) or 'Rework' (re-inspection of reworked pieces).</summary>
+        public string InspType { get; set; } = "Normal";
     }
 }

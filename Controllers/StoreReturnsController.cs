@@ -119,6 +119,7 @@ namespace EMSAPI.Controllers
                         l.OAYear, l.OANo, OaID = l.OAID,
                         IssueQty = l.Qty, BalQty = bal, RtnQty = ownQty,
                         ReturnType = o?.ReturnType ?? "Unused",
+                        Store = o?.Store ?? "", Location = o?.Location ?? "",   // SQL 80
                         l.Unit, ItemRemarks = o?.ItemRemarks ?? ""
                     });
                 }
@@ -130,6 +131,7 @@ namespace EMSAPI.Controllers
                         o.GradeNo, Grade = o.Grade ?? "", o.OAYear, o.OANo, OaID = o.OAID,
                         IssueQty = o.IssueQty, BalQty = o.RTNQty, RtnQty = o.RTNQty,
                         ReturnType = o.ReturnType ?? "Unused",
+                        Store = o.Store ?? "", Location = o.Location ?? "",     // SQL 80
                         o.Unit, ItemRemarks = o.ItemRemarks ?? ""
                     });
                 }
@@ -395,6 +397,21 @@ namespace EMSAPI.Controllers
                 var plan = await db.CallStoreReturnsDtlPlanFieldsSP(id,
                     string.IsNullOrWhiteSpace(dto.ReturnType) ? null : dto.ReturnType.Trim(), dto.UserNo, h.SubscID);
                 if (plan.ID == 0) return ConflictResult(label + ": " + plan.Message);
+
+                // Bin (SQL 80): where the returned bar is put — the one picked,
+                // else the bin its issue line took it from.
+                var store = Trunc(dto.Store, 50).Trim();
+                var location = store.Length > 0 ? Trunc(dto.Location, 50).Trim() : "";
+                if (store.Length > 0 && !await BinExists(store, location, h.SubscID))
+                    return ConflictResult($"{label}: bin {store}{(location.Length > 0 ? " / " + location : "")} is not on the Store Location master.");
+                if (store.Length == 0)
+                {
+                    var issueBin = await db.StoreIssueDtl.AsNoTracking().Where(d => d.TransSlNo == dto.LinkNo)
+                        .Select(d => new { d.Store, d.Location }).FirstOrDefaultAsync();
+                    store = (issueBin?.Store ?? "").Trim();
+                    location = (issueBin?.Location ?? "").Trim();
+                }
+                await SetLineBin("StoreReturnsDtl", id, store, location);
 
                 await tx.CommitAsync();
                 return OkResult(new { id, TransSlNo = id }, "Line saved.");

@@ -94,6 +94,7 @@ namespace EMSAPI.Controllers
                     OpeningQty = dto.OpeningQty,
                     Remarks    = (dto.Remarks ?? "").Trim(),
                     LockStatus = dto.LockStatus == "N" ? "N" : "Y",
+                    DieCode    = (dto.DieCode ?? "").Trim(),
                     CreatedBy  = userNo,
                     CreatedOn  = now,
                     ModifiedBy = userNo,
@@ -201,7 +202,8 @@ namespace EMSAPI.Controllers
         {
             // Live production per die; before SQL 53 the stored UsedQty stands in.
             var usage = await db.PmTableExistsAsync("JobCardEntry")
-                ? "SELECT COUNT(*) AS n, ISNULL(SUM(e.Qty), 0) AS q FROM dbo.JobCardEntry e WHERE e.DieNo = d.MTransNo AND e.DeleteStatus = 'N'"
+                // Die life counts forging-step entries only (SQL 77).
+                ? "SELECT COUNT(*) AS n, ISNULL(SUM(e.Qty), 0) AS q FROM dbo.JobCardEntry e WHERE e.DieNo = d.MTransNo AND e.DeleteStatus = 'N' AND e.StepSlNo = dbo.FN_JobCardForgeStep(e.MTransNo)"
                 : "SELECT 0 AS n, d.UsedQty AS q";
 
             var sql = $"""
@@ -210,7 +212,9 @@ namespace EMSAPI.Controllers
                        d.PartNo                            AS partNo,
                        ISNULL(p.PartCode, '')              AS partCode,
                        ISNULL(p.PartName, '')              AS partName,
-                       ISNULL(p.PartCode, '')              AS dieCode,
+                       -- The die's own code (SQL 77); a die without one shows its part code.
+                       ISNULL(NULLIF(d.DieCode, ''), ISNULL(p.PartCode, '')) AS dieCode,
+                       ISNULL(d.DieCode, '')               AS ownDieCode,
                        ISNULL(p.PartName, '')              AS dieName,
                        ISNULL(g.Grade, '')                 AS grade,
                        d.GradeNo                           AS gradeNo,

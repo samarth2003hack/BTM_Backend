@@ -357,6 +357,38 @@ namespace EMSAPI.Controllers
         /// weight, die, default hammer, forging rate and setup — and per grade
         /// what it is cut from (ConvBOM) and its die (DieMst, one per part + grade).
         /// </summary>
+        /// <summary>
+        /// Rule 14 — the days each hammer is down for a breakdown in a plan
+        /// month, for the page's plan engine (PlanSchedule.calendarInfo
+        /// downDays). Same rule as the server engine (HammerDownDays).
+        ///   GET GetHammerDownDays?Month=yyyy-MM&SubscID=
+        ///   → [{ machineNo, date, breakdownNo }]
+        /// </summary>
+        [HttpGet("GetHammerDownDays")]
+        public async Task<IActionResult> GetHammerDownDays([FromQuery] string? Month, [FromQuery] int SubscID)
+        {
+            if (SubscID <= 0) return BadRequestResult("Invalid Subscription.");
+            if (string.IsNullOrWhiteSpace(Month) || Month.Trim().Length < 7) return BadRequestResult("Invalid month.");
+            try
+            {
+                var data = await LoadPlanningData(SubscID);
+                var info = await CalendarOf(Month.Trim()[..7], data);
+                if (info == null) return OkResult(new List<object>(), "No Work Calendar for the month.");
+                var rows = await HammerDownDays(SubscID, info.Dates,
+                    S(await QueryOne(@"SELECT TOP (1) ShiftStart AS s FROM dbo.WorkCalendarMst
+                                        WHERE SubscID = @S AND DeleteStatus = 'N' AND CalMonth = @M
+                                        ORDER BY CASE WHEN LockStatus = 'Y' THEN 0 ELSE 1 END, MTransNo",
+                        Int("@S", SubscID), Str("@M", Month.Trim()[..7], 7)), "s"),
+                    S(await QueryOne(@"SELECT TOP (1) ShiftEnd AS s FROM dbo.WorkCalendarMst
+                                        WHERE SubscID = @S AND DeleteStatus = 'N' AND CalMonth = @M
+                                        ORDER BY CASE WHEN LockStatus = 'Y' THEN 0 ELSE 1 END, MTransNo",
+                        Int("@S", SubscID), Str("@M", Month.Trim()[..7], 7)), "s"));
+                var list = rows.Select(d => new { machineNo = d.MachineNo, date = d.Date, breakdownNo = d.BreakdownNo }).ToList();
+                return OkResult(list, list.Count > 0 ? "Data found." : "No hammer is down this month.");
+            }
+            catch (Exception ex) { return ErrorResult(ex); }
+        }
+
         [HttpGet("GetPlanningParts/{subscID}")]
         public async Task<IActionResult> GetPlanningParts(int subscID)
         {
@@ -391,13 +423,21 @@ namespace EMSAPI.Controllers
                     var gradeRows = kv.Value.Select(g =>
                     {
                         var bar = data.BarOf(partNo, g);
-                        var die = dies.FirstOrDefault(x => I(x, "partNo") == partNo && string.Equals(S(x, "grade"), g, StringComparison.OrdinalIgnoreCase));
-                        var dieNo = die == null ? 0 : I(die, "dieNo");
-                        var dieInfo = dieNo > 0 && data.Dies.TryGetValue(dieNo, out var di) ? di : ("", "Ready", 0d);
+                        // Every die of this part + grade (SQL 77: several dies, each with its own code).
+                        // The first Ready die with life left is the default for a new job.
+                        var gradeDies = dies.Where(x => I(x, "partNo") == partNo && string.Equals(S(x, "grade"), g, StringComparison.OrdinalIgnoreCase))
+                            .Select(x => I(x, "dieNo"))
+                            .Select(no => (no, info: data.Dies.TryGetValue(no, out var di) ? di : ("", "Ready", 0d)))
+                            .Select(t => new { dieNo = t.no, dieName = t.info.Item1, dieStatus = t.info.Item2, dieRemaining = t.info.Item3 })
+                            .OrderBy(t => t.dieStatus == "Ready" && t.dieRemaining > 0 ? 0 : 1).ThenBy(t => t.dieNo)
+                            .ToList();
+                        var first = gradeDies.FirstOrDefault();
                         return new
                         {
                             grade = g, cutWt = bar.CutWt, rmGrade = bar.RMGrade, barDia = bar.Dia, rmText = bar.Text,
-                            rmPartNo = bar.RMPartNo, dieNo, dieName = dieInfo.Item1, dieStatus = dieInfo.Item2, dieRemaining = dieInfo.Item3,
+                            rmPartNo = bar.RMPartNo, dieNo = first?.dieNo ?? 0, dieName = first?.dieName ?? "",
+                            dieStatus = first?.dieStatus ?? "Ready", dieRemaining = first?.dieRemaining ?? 0d,
+                            dies = gradeDies,
                         };
                     }).ToList();
                     var firstWithBar = gradeRows.FirstOrDefault(g => g.cutWt > 0) ?? gradeRows.FirstOrDefault();

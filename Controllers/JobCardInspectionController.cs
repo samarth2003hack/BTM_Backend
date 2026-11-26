@@ -20,7 +20,9 @@ namespace EMSAPI.Controllers
     /// step when the route has none). The pieces inspected across all its
     /// inspections may never exceed what reached that step; each inspection
     /// splits into OK + Rework + Rejected = Inspected. SP_JobCardInspection
-    /// re-checks the cap under a lock. Rejected pieces carry a reason from
+    /// re-checks the cap under a lock. SQL 79 — rework loop: an inspection of
+    /// type 'Rework' re-inspects reworked pieces, capped by the rework still
+    /// waiting (rework marked − already re-inspected); its OK goes to FG stock. Rejected pieces carry a reason from
     /// Other Master 'Rejection Reason' (SQL 58) — required whenever that list
     /// has rows for the subscription.
     /// </summary>
@@ -46,6 +48,7 @@ namespace EMSAPI.Controllers
                     x.ReworkQty                         AS reworkQty,
                     x.RejectedQty                       AS rejectedQty,
                     ISNULL(x.RejectionReason, '')       AS rejectionReason,
+                    ISNULL(x.InspType, 'Normal')        AS inspType,
                     x.Remarks                           AS remarks,
                     CONVERT(char(10), x.CreatedOn, 23)  AS createdOn
               FROM  dbo.JobCardInspection x
@@ -133,15 +136,35 @@ namespace EMSAPI.Controllers
                 // A friendlier refusal than the SP's when the cap is exceeded.
                 var jc = await JobCardRow(r.JobCardNo);
                 if (jc == null || I(jc, "mTransNo") == 0) return ConflictResult("Select a job card.");
-                var already = D(await QueryOne(@"
-                    SELECT ISNULL(SUM(InspectedQty), 0) AS Q FROM dbo.JobCardInspection
+                // SQL 79: an inspection keeps its type; a new one is Normal unless asked for Rework.
+                var inspType = isUpdate
+                    ? S(await QueryOne("SELECT ISNULL(InspType, 'Normal') AS T FROM dbo.JobCardInspection WHERE MTransNo = @M",
+                        Int("@M", r.MTransNo)), "T")
+                    : (string.Equals(r.InspType, "Rework", StringComparison.OrdinalIgnoreCase) ? "Rework" : "Normal");
+                var mine = await QueryOne(@"
+                    SELECT ISNULL(SUM(CASE WHEN InspType = 'Normal' THEN InspectedQty ELSE 0 END), 0) AS Already,
+                           ISNULL(SUM(ReworkQty), 0) AS ReworkMarked,
+                           ISNULL(SUM(CASE WHEN InspType = 'Rework' THEN InspectedQty ELSE 0 END), 0) AS ReworkDone
+                      FROM dbo.JobCardInspection
                      WHERE JobCardTransNo = @J AND DeleteStatus = 'N' AND MTransNo <> @M",
-                    Int("@J", r.JobCardNo), Int("@M", isUpdate ? r.MTransNo : 0)), "Q");
-                var eligible = D(jc, "inspectionEligibleQty");
-                if (already + r.InspectedQty > eligible)
-                    return ConflictResult(
-                        $"Only {Q(Math.Max(0, eligible - already))} pieces of {S(jc, "jobCardNo")} are awaiting inspection " +
-                        $"({Q(eligible)} processed at step {S(jc, "inspectionStepLabel")}, {Q(already)} already inspected).");
+                    Int("@J", r.JobCardNo), Int("@M", isUpdate ? r.MTransNo : 0));
+                if (inspType == "Rework")
+                {
+                    var waiting = D(mine, "ReworkMarked") - D(mine, "ReworkDone");
+                    if (r.InspectedQty > waiting)
+                        return ConflictResult(
+                            $"Only {Q(Math.Max(0, waiting))} reworked pieces of {S(jc, "jobCardNo")} are waiting for re-inspection " +
+                            $"({Q(D(mine, "ReworkMarked"))} marked Rework, {Q(D(mine, "ReworkDone"))} already re-inspected).");
+                }
+                else
+                {
+                    var already = D(mine, "Already");
+                    var eligible = D(jc, "inspectionEligibleQty");
+                    if (already + r.InspectedQty > eligible)
+                        return ConflictResult(
+                            $"Only {Q(Math.Max(0, eligible - already))} pieces of {S(jc, "jobCardNo")} are awaiting inspection " +
+                            $"({Q(eligible)} processed at step {S(jc, "inspectionStepLabel")}, {Q(already)} already inspected).");
+                }
 
                 var result = await db.CallJobCardInspectionSP(new SP_JobCardInspection
                 {
@@ -158,6 +181,7 @@ namespace EMSAPI.Controllers
                     SystemIP = ClientIp,
                     UserNo = r.CreatedBy,
                     SubscID = r.SubscID,
+                    InspType = inspType,
                 });
                 if (result.ID == 0) return ConflictResult(result.Message);
 

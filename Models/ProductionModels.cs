@@ -98,6 +98,7 @@ namespace EMSAPI.Models
         // UsedQty, ProcessQty, RemainingQty NOT in DTO — computed by SP
         public string? Remarks { get; set; }
         public string? LockStatus { get; set; }
+        public string? DieCode { get; set; }         // SQL 77 — the die's own number; null on Update = keep
 
         public int? CreatedBy { get; set; }
         public DateTime? CreatedOn { get; set; }

@@ -206,10 +206,12 @@ namespace EMSAPI.Controllers
                 d.GradeNos[(I(r, "partNo"), S(r, "grade").ToUpperInvariant())] = I(r, "gradeNo");
 
             foreach (var r in await Query(@"
-                SELECT dm.MTransNo AS dieNo, CONCAT(ISNULL(p.PartCode, ''), CASE WHEN mg.Grade IS NULL THEN '' ELSE ' · ' + mg.Grade END) AS name,
+                SELECT dm.MTransNo AS dieNo,
+                       CONCAT(ISNULL(NULLIF(dm.DieCode, ''), ISNULL(p.PartCode, '')), CASE WHEN mg.Grade IS NULL THEN '' ELSE ' · ' + mg.Grade END) AS name,
                        ISNULL(dm.DieStatus, 'Ready') AS status,
                        CASE WHEN ISNULL(dm.MaxQty, 0) - ISNULL(dm.OpeningQty, 0) - ISNULL(dm.UsedQty, 0) < 0 THEN 0
-                            ELSE ISNULL(dm.MaxQty, 0) - ISNULL(dm.OpeningQty, 0) - ISNULL(dm.UsedQty, 0) END AS remaining
+                            ELSE ISNULL(dm.MaxQty, 0) - ISNULL(dm.OpeningQty, 0) - ISNULL(dm.UsedQty, 0) END AS remaining,
+                       LTRIM(RTRIM(ISNULL(dm.DieType, ''))) AS dieType
                   FROM dbo.DieMst dm
                   LEFT JOIN dbo.PartMaster p ON p.MTransNo = dm.PartNo
                   OUTER APPLY (SELECT TOP (1) g.Grade FROM dbo.MaterialGrade g
@@ -402,9 +404,72 @@ namespace EMSAPI.Controllers
             if (cal == null) return null;
             var hol = (await Query("SELECT CONVERT(char(10), HoliDate, 23) AS d FROM dbo.WorkCalendarHoliday WHERE MTransNo = @Id AND DeleteStatus = 'N'",
                 Int("@Id", I(cal, "id")))).Select(r => S(r, "d"));
-            return CalendarInfoOf(S(cal, "calMonth"), S(cal, "shiftName"), S(cal, "shiftStart"), S(cal, "shiftEnd"),
+            var info = CalendarInfoOf(S(cal, "calMonth"), S(cal, "shiftName"), S(cal, "shiftStart"), S(cal, "shiftEnd"),
                 I(cal, "breakMin"), S(cal, "weeklyOff"), hol,
                 data.Hammers.Select(h => new Hammer { MachineNo = h.MachineNo, Shifts = h.Shifts, Efficiency = h.Efficiency }));
+            // Rule 14 — a hammer under breakdown loses those days.
+            foreach (var d in await HammerDownDays(data.SubscID, info.Dates, S(cal, "shiftStart"), S(cal, "shiftEnd")))
+            {
+                var key = d.MachineNo.ToString(CultureInfo.InvariantCulture);
+                if (!info.DownDates.TryGetValue(key, out var set)) info.DownDates[key] = set = new HashSet<string>();
+                set.Add(d.Date);
+            }
+            return info;
+        }
+
+        /// <summary>
+        /// Rule 14 — the working dates each machine is down for a breakdown
+        /// (Breakdown, BreakdownMst). A date is lost when the breakdown covers
+        /// at least half of that date's shift (Work Calendar shift start → end).
+        /// A breakdown runs from BreakdownOn to RepairEnd; one not yet repaired
+        /// (no RepairEnd, status not Closed) keeps the machine down on every
+        /// later date, so the plan never counts on a broken hammer. Closing the
+        /// breakdown gives the days back.
+        /// </summary>
+        protected async Task<List<(int MachineNo, string Date, string BreakdownNo)>> HammerDownDays(
+            int subscID, IList<string> dates, string? shiftStart, string? shiftEnd)
+        {
+            var result = new List<(int, string, string)>();
+            if (dates.Count == 0) return result;
+            static double Min(string? hhmm) =>
+                TimeSpan.TryParse(hhmm ?? "", CultureInfo.InvariantCulture, out var t) ? t.TotalMinutes : double.NaN;
+            var startMin = Min(shiftStart);
+            var endMin = Min(shiftEnd);
+            if (double.IsNaN(startMin) || double.IsNaN(endMin)) { startMin = 0; endMin = 24 * 60; }
+            if (endMin <= startMin) endMin += 24 * 60;     // night shift runs past midnight
+            var shiftMin = endMin - startMin;
+
+            var first = DateTime.ParseExact(dates[0], "yyyy-MM-dd", CultureInfo.InvariantCulture);
+            var last = DateTime.ParseExact(dates[^1], "yyyy-MM-dd", CultureInfo.InvariantCulture).AddDays(2);
+            var rows = await Query(@"
+                SELECT b.MachineNo AS machineNo, ISNULL(b.BreakdownNo, '') AS breakdownNo,
+                       b.BreakdownOn AS fromOn,
+                       CASE WHEN b.RepairEnd IS NOT NULL THEN b.RepairEnd
+                            WHEN b.BreakdownStatus = 'Closed' THEN b.BreakdownOn
+                            ELSE NULL END AS toOn
+                  FROM dbo.BreakdownMst b
+                 WHERE b.SubscID = @S AND b.DeleteStatus = 'N' AND ISNULL(b.MachineNo, 0) > 0 AND b.BreakdownOn IS NOT NULL
+                   AND b.BreakdownOn < @Last
+                   AND (b.RepairEnd IS NULL OR b.RepairEnd >= @First)",
+                Int("@S", subscID),
+                new SqlParameter("@First", SqlDbType.DateTime) { Value = first },
+                new SqlParameter("@Last", SqlDbType.DateTime) { Value = last });
+            foreach (var r in rows)
+            {
+                var from = Convert.ToDateTime(r["fromOn"], CultureInfo.InvariantCulture);
+                var to = r["toOn"] == null || r["toOn"] is DBNull ? DateTime.MaxValue : Convert.ToDateTime(r["toOn"], CultureInfo.InvariantCulture);
+                foreach (var iso in dates)
+                {
+                    var day = DateTime.ParseExact(iso, "yyyy-MM-dd", CultureInfo.InvariantCulture);
+                    var s = day.AddMinutes(startMin);
+                    var e = day.AddMinutes(endMin);
+                    var a = from > s ? from : s;
+                    var b = to < e ? to : e;
+                    if (b > a && (b - a).TotalMinutes >= shiftMin / 2)
+                        result.Add((I(r, "machineNo"), iso, S(r, "breakdownNo")));
+                }
+            }
+            return result.Distinct().ToList();
         }
 
         // ================================================================

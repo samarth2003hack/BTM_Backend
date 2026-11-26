@@ -417,7 +417,12 @@ namespace EMSAPI.Controllers
                 FROM dbo.PackingSlipDtl pd
                 JOIN dbo.PackingSlipMst pm ON pm.MTransNo = pd.MTransNo
                 WHERE pm.SubscID = @SubscID AND pm.DeleteStatus = 'N' AND pd.DeleteStatus = 'N'
-                  AND pm.OAYear = @Year AND pm.OANo = @No AND pd.OAID = @Line
+                  -- PackingSlipDtl.OAID holds the OA line's TransSlNo (not its line number); match it
+                  -- in every revision of the OA, since an amendment gives the line a new TransSlNo.
+                  AND pm.OAYear = @Year AND pm.OANo = @No AND pd.OAID IN (SELECT od.TransSlNo FROM dbo.OADtl od
+                                    JOIN dbo.OAMst om ON om.MTransNo = od.MTransNo
+                                   WHERE om.SubscID = @SubscID AND om.DocYear = @Year AND om.DocNo = @No
+                                     AND CAST(od.SlNo AS int) = @Line)
                 GROUP BY pm.MTransNo, pm.DocSeries, pm.DocNo, pm.DocDate
                 ORDER BY pm.DocDate, pm.DocNo",
                 K(k));
@@ -435,7 +440,11 @@ namespace EMSAPI.Controllers
                 FROM dbo.STxnDtl sd
                 JOIN dbo.STxnMst sm ON sm.MTransNo = sd.MTransNo
                 WHERE sm.SubscID = @SubscID AND sm.DeleteStatus = 'N' AND sd.DeleteStatus = 'N'
-                  AND sd.LinkNo = @Trans
+                  -- An invoice line keeps the TransSlNo of the OA revision it was raised against.
+                  AND sd.LinkNo IN (SELECT od.TransSlNo FROM dbo.OADtl od
+                                    JOIN dbo.OAMst om ON om.MTransNo = od.MTransNo
+                                   WHERE om.SubscID = @SubscID AND om.DocYear = @Year AND om.DocNo = @No
+                                     AND CAST(od.SlNo AS int) = @Line)
                 GROUP BY sm.MTransNo, sm.DocSeries, sm.DocNo, sm.DocDate
                 ORDER BY sm.DocDate, sm.DocNo",
                 K(k));

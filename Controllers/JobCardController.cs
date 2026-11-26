@@ -88,6 +88,8 @@ namespace EMSAPI.Controllers
                     s.ReworkQty                             AS reworkQty,
                     s.RejectedQty                           AS rejectedQty,
                     s.AwaitingInspectionQty                 AS awaitingInspectionQty,
+                    s.ReworkInspectedQty                    AS reworkInspectedQty,   -- SQL 79
+                    s.ReworkPendingQty                      AS reworkPendingQty,     -- SQL 79
                     s.InspectionCount                       AS inspectionCount,
                     s.RMIssuedQty                           AS rmIssuedQty,
                     s.RMBalanceQty                          AS rmBalanceQty,
@@ -454,6 +456,73 @@ namespace EMSAPI.Controllers
                 var oa = await OALine(r.OAYear, r.OANo, r.OAID, r.SubscID);
                 if (oa == null) return ConflictResult("Select the order acceptance (OA Year, OA No and OA ID).");
                 if (I(oa, "partNo") != r.PartNo) return ConflictResult("The OA line does not order this product.");
+
+                // ── Safeguards against making the same order twice ─────
+                // Only for hand-made job cards: a plan's job cards come from its
+                // release and follow the plan's quantities.
+                if (planId == 0)
+                {
+                    var oaText = $"OA {r.OAYear}/{r.OANo} line {r.OAID}";
+
+                    // 1. An OA line held by a production plan gets its job cards
+                    //    from that plan's release, never by hand.
+                    if (!isUpdate && I(await QueryOne(
+                            "SELECT CASE WHEN OBJECT_ID(N'dbo.ProductionPlanLine', N'U') IS NULL THEN 0 ELSE 1 END AS ok"), "ok") == 1)
+                    {
+                        var held = await QueryOne(@"
+                            SELECT TOP (1) pm.PlanNo, pm.PlanStatus
+                              FROM dbo.ProductionPlanLine l
+                              JOIN dbo.ProductionPlanMst pm ON pm.MTransNo = l.MTransNo
+                                                           AND pm.DeleteStatus = 'N' AND pm.PlanStatus <> 'Closed'
+                              JOIN dbo.ProductionPlanJob pj ON pj.MTransNo = l.MTransNo AND pj.JobSeq = l.JobSeq
+                                                           AND pj.DeleteStatus = 'N'
+                             WHERE pm.SubscID = @S AND l.DeleteStatus = 'N' AND l.Source = 'OA'
+                               AND l.OAYear = @Y AND l.OANo = @N AND l.OAID = @I
+                             ORDER BY pm.MTransNo DESC",
+                            Int("@S", r.SubscID), Int("@Y", r.OAYear), Int("@N", r.OANo), Int("@I", r.OAID));
+                        if (held != null)
+                            return ConflictResult(
+                                $"{oaText} is in production plan {S(held, "PlanNo")} ({S(held, "PlanStatus")}). " +
+                                "Its job cards come from the plan's week release — release the week there, " +
+                                "or take the line out of the plan before making a job card here.");
+                    }
+
+                    // 2. All job cards of an OA line together may not order more
+                    //    than the OA quantity plus the part's Extra allowed %.
+                    //    An edit is checked only when it asks for more pieces or
+                    //    moves to another OA line.
+                    var before = isUpdate
+                        ? await QueryOne(@"SELECT Qty, OAYear, OANo, OAID FROM dbo.JobCardMst WHERE MTransNo = @M",
+                            Int("@M", r.MTransNo))
+                        : null;
+                    var sameLine = before != null && I(before, "OAYear") == r.OAYear && I(before, "OANo") == r.OANo
+                                   && I(before, "OAID") == r.OAID;
+                    if (!sameLine || r.Qty > D(before, "Qty"))
+                    {
+                        var others = await Query(@"
+                            SELECT j.JobCardNo, j.Qty FROM dbo.JobCardMst j
+                             WHERE j.SubscID = @S AND j.DeleteStatus = 'N' AND j.MTransNo <> @M
+                               AND j.OAYear = @Y AND j.OANo = @N AND j.OAID = @I
+                             ORDER BY j.MTransNo",
+                            Int("@S", r.SubscID), Int("@M", isUpdate ? r.MTransNo : 0),
+                            Int("@Y", r.OAYear), Int("@N", r.OANo), Int("@I", r.OAID));
+                        var onCards = others.Sum(o => D(o, "Qty"));
+                        var extraPct = D(await QueryOne(
+                            "SELECT ISNULL(ExcessPct, 0) AS pct FROM dbo.PartMaster WHERE MTransNo = @P",
+                            Int("@P", r.PartNo)), "pct");
+                        var oaQty = D(oa, "qty");
+                        var cap = Math.Round(oaQty * (1 + extraPct / 100m), 3);
+                        if (onCards + r.Qty > cap)
+                        {
+                            var left = Math.Max(0, cap - onCards);
+                            return ConflictResult(
+                                $"{oaText} orders {Q(oaQty)}" + (extraPct > 0 ? $" (+{Q(extraPct)} % allowed = {Q(cap)})" : "") +
+                                $"; {Q(onCards)} already on job card" + (others.Count == 1 ? " " : "s ") +
+                                string.Join(", ", others.Select(o => S(o, "JobCardNo"))) +
+                                $". This job card can take at most {Q(left)}, not {Q(r.Qty)}.");
+                        }
+                    }
+                }
 
                 // ── Grade (resolved to MaterialGrade) ──────────────────
                 if (string.IsNullOrWhiteSpace(r.Grade)) return ConflictResult("Grade is required.");

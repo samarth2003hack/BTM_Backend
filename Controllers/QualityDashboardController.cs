@@ -12,7 +12,8 @@ namespace EMSAPI.Controllers
     ///
     /// Sources (all totals are summed in SQL; only small grouped rows come back):
     ///   in-process   JobCardInspection by InspDate: InspectedQty / OKQty /
-    ///                ReworkQty / RejectedQty; reasons = RejectionReason trimmed,
+    ///                ReworkQty / RejectedQty (SQL 79: inspected and rework from first-pass
+    ///                inspections only; rejected from every inspection); reasons = RejectionReason trimmed,
     ///                compared case-insensitively ("Crack" / "crack " together)
     ///   loss value   rejected qty × the job card's OA line Rate (current revision)
     ///   incoming     GRNDtl Rec / Acc / Rej / Rew / AOD qty of inspected GRNs
@@ -72,15 +73,15 @@ namespace EMSAPI.Controllers
 
             // ── in-process inspection: by day, by part, by reason ────────
             var byDay = await t.Time("inspection by day", () => Rows(con, @"
-                SELECT i.InspDate AS d, SUM(ISNULL(i.InspectedQty, 0)) AS inspected, SUM(ISNULL(i.RejectedQty, 0)) AS rejected,
-                       SUM(ISNULL(i.ReworkQty, 0)) AS rework" + InPeriod + @"
+                SELECT i.InspDate AS d, SUM(CASE WHEN i.InspType = 'Rework' THEN 0 ELSE ISNULL(i.InspectedQty, 0) END) AS inspected, SUM(ISNULL(i.RejectedQty, 0)) AS rejected,
+                       SUM(CASE WHEN i.InspType = 'Rework' THEN 0 ELSE ISNULL(i.ReworkQty, 0) END) AS rework" + InPeriod + @"
                  GROUP BY i.InspDate", P()));
 
             var partRows = await t.Time("inspection by part", () => Rows(con, @"
                 SELECT j.PartNo AS partNo, ISNULL(p.PartCode, '') AS partCode, ISNULL(p.PartName, '') AS partName,
                        LTRIM(RTRIM(ISNULL(j.Grade, ''))) AS grade,
-                       SUM(ISNULL(i.InspectedQty, 0)) AS inspected, SUM(ISNULL(i.RejectedQty, 0)) AS rejected,
-                       SUM(ISNULL(i.ReworkQty, 0)) AS rework, SUM(ISNULL(i.RejectedQty, 0) * ISNULL(oa.Rate, 0)) AS lossValue
+                       SUM(CASE WHEN i.InspType = 'Rework' THEN 0 ELSE ISNULL(i.InspectedQty, 0) END) AS inspected, SUM(ISNULL(i.RejectedQty, 0)) AS rejected,
+                       SUM(CASE WHEN i.InspType = 'Rework' THEN 0 ELSE ISNULL(i.ReworkQty, 0) END) AS rework, SUM(ISNULL(i.RejectedQty, 0) * ISNULL(oa.Rate, 0)) AS lossValue
                   FROM dbo.JobCardInspection i
                   JOIN dbo.JobCardMst j ON j.MTransNo = i.JobCardTransNo AND j.DeleteStatus = 'N'
                   LEFT JOIN dbo.PartMaster p ON p.MTransNo = j.PartNo" + OaRate + @"
